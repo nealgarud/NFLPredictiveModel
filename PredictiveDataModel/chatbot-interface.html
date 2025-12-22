@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NFL Spread Prediction Chatbot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 800px;
+            width: 100%;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .prediction-form {
+            padding: 40px;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .submit-btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .submit-btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .submit-btn:active {
+            transform: translateY(0);
+        }
+
+        .submit-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .result {
+            margin-top: 30px;
+            padding: 25px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            display: none;
+        }
+
+        .result.show {
+            display: block;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .result-header {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .prediction-box {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #667eea;
+        }
+
+        .prediction-box h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .prediction-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: #333;
+            margin: 10px 0;
+        }
+
+        .breakdown {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .breakdown-item {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .breakdown-item h4 {
+            color: #667eea;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .breakdown-item .value {
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .breakdown-item .record {
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #667eea;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏈 NFL Spread Prediction</h1>
+            <p>Get AI-powered predictions based on historical ATS data</p>
+        </div>
+
+        <div class="prediction-form">
+            <form id="predictionForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="teamA">Team A (Visitor)</label>
+                        <select id="teamA" required>
+                            <option value="">Select team...</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="teamB">Team B (Home)</label>
+                        <select id="teamB" required>
+                            <option value="">Select team...</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="spread">Spread (e.g., -2.5 means Team A favored by 2.5)</label>
+                    <input type="number" id="spread" step="0.5" placeholder="Enter spread..." required>
+                </div>
+
+                <button type="submit" class="submit-btn" id="submitBtn">
+                    Get Prediction
+                </button>
+            </form>
+
+            <div id="loading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p style="margin-top: 15px;">Analyzing matchup...</p>
+            </div>
+
+            <div id="result" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'https://bck79rw0nf.execute-api.us-east-1.amazonaws.com/Deployment';
+
+        // NFL Teams
+        const teams = [
+            {abbr: "ARI", name: "Cardinals"}, {abbr: "ATL", name: "Falcons"},
+            {abbr: "BAL", name: "Ravens"}, {abbr: "BUF", name: "Bills"},
+            {abbr: "CAR", name: "Panthers"}, {abbr: "CHI", name: "Bears"},
+            {abbr: "CIN", name: "Bengals"}, {abbr: "CLE", name: "Browns"},
+            {abbr: "DAL", name: "Cowboys"}, {abbr: "DEN", name: "Broncos"},
+            {abbr: "DET", name: "Lions"}, {abbr: "GB", name: "Packers"},
+            {abbr: "HOU", name: "Texans"}, {abbr: "IND", name: "Colts"},
+            {abbr: "JAX", name: "Jaguars"}, {abbr: "KC", name: "Chiefs"},
+            {abbr: "LAC", name: "Chargers"}, {abbr: "LAR", name: "Rams"},
+            {abbr: "LV", name: "Raiders"}, {abbr: "MIA", name: "Dolphins"},
+            {abbr: "MIN", name: "Vikings"}, {abbr: "NE", name: "Patriots"},
+            {abbr: "NO", name: "Saints"}, {abbr: "NYG", name: "Giants"},
+            {abbr: "NYJ", name: "Jets"}, {abbr: "PHI", name: "Eagles"},
+            {abbr: "PIT", name: "Steelers"}, {abbr: "SEA", name: "Seahawks"},
+            {abbr: "SF", name: "49ers"}, {abbr: "TB", name: "Buccaneers"},
+            {abbr: "TEN", name: "Titans"}, {abbr: "WAS", name: "Commanders"}
+        ];
+
+        // Populate team dropdowns
+        const teamASelect = document.getElementById('teamA');
+        const teamBSelect = document.getElementById('teamB');
+
+        teams.forEach(team => {
+            const optionA = document.createElement('option');
+            optionA.value = team.abbr;
+            optionA.textContent = `${team.abbr} - ${team.name}`;
+            teamASelect.appendChild(optionA);
+
+            const optionB = document.createElement('option');
+            optionB.value = team.abbr;
+            optionB.textContent = `${team.abbr} - ${team.name}`;
+            teamBSelect.appendChild(optionB);
+        });
+
+        // Handle form submission
+        document.getElementById('predictionForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const teamA = document.getElementById('teamA').value;
+            const teamB = document.getElementById('teamB').value;
+            const spread = parseFloat(document.getElementById('spread').value);
+
+            if (teamA === teamB) {
+                alert('Please select different teams!');
+                return;
+            }
+
+            // Show loading
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('result').classList.remove('show');
+            document.getElementById('submitBtn').disabled = true;
+
+            try {
+                const response = await fetch(`${API_URL}/predict`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        team_a: teamA,
+                        team_b: teamB,
+                        spread: spread,
+                        team_a_home: false,
+                        seasons: [2024, 2025]
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    displayResult(result.data);
+                } else {
+                    displayError(result.error);
+                }
+            } catch (error) {
+                displayError('Failed to connect to prediction API: ' + error.message);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('submitBtn').disabled = false;
+            }
+        });
+
+        function displayResult(data) {
+            const resultDiv = document.getElementById('result');
+            const pred = data.prediction;
+            const breakdown = data.breakdown;
+
+            resultDiv.innerHTML = `
+                <div class="result-header">${data.matchup}</div>
+                <div class="prediction-box">
+                    <h3>📊 Recommended Bet</h3>
+                    <div class="prediction-value">${pred.recommended_bet}</div>
+                    <p><strong>Confidence:</strong> ${(pred.confidence * 100).toFixed(1)}%</p>
+                    <p><strong>Edge:</strong> ${(pred.edge * 100).toFixed(1)}%</p>
+                </div>
+
+                <div class="prediction-box">
+                    <h3>🎯 Cover Probabilities</h3>
+                    <p><strong>${data.favored_team}:</strong> ${(pred.favored_cover_probability * 100).toFixed(1)}%</p>
+                    <p><strong>${data.underdog_team}:</strong> ${(pred.underdog_cover_probability * 100).toFixed(1)}%</p>
+                </div>
+
+                <div class="breakdown">
+                    <div class="breakdown-item">
+                        <h4>Situational ATS (40%)</h4>
+                        <div class="value">${(breakdown.situational_ats.favored_rate * 100).toFixed(1)}% vs ${(breakdown.situational_ats.underdog_rate * 100).toFixed(1)}%</div>
+                        <div class="record">${breakdown.situational_ats.favored_record} vs ${breakdown.situational_ats.underdog_record}</div>
+                    </div>
+                    <div class="breakdown-item">
+                        <h4>Overall ATS (30%)</h4>
+                        <div class="value">${(breakdown.overall_ats.favored_rate * 100).toFixed(1)}% vs ${(breakdown.overall_ats.underdog_rate * 100).toFixed(1)}%</div>
+                        <div class="record">${breakdown.overall_ats.favored_record} vs ${breakdown.overall_ats.underdog_record}</div>
+                    </div>
+                    <div class="breakdown-item">
+                        <h4>Home/Away (30%)</h4>
+                        <div class="value">${(breakdown.home_away.favored_rate * 100).toFixed(1)}% vs ${(breakdown.home_away.underdog_rate * 100).toFixed(1)}%</div>
+                        <div class="record">${breakdown.home_away.location}</div>
+                    </div>
+                </div>
+            `;
+
+            resultDiv.classList.add('show');
+        }
+
+        function displayError(error) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = `
+                <div class="error">
+                    <strong>Error:</strong> ${error}
+                </div>
+            `;
+            resultDiv.classList.add('show');
+        }
+    </script>
+</body>
+</html>
+

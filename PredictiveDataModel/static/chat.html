@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NFL Spread Prediction Chatbot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .chat-container {
+            width: 90%;
+            max-width: 800px;
+            height: 90vh;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .chat-header h1 {
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+
+        .chat-header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f7f7f7;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            animation: fadeIn 0.3s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            word-wrap: break-word;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            color: #333;
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .typing-indicator {
+            display: none;
+            padding: 12px 16px;
+            background: white;
+            border-radius: 18px;
+            border-bottom-left-radius: 4px;
+            width: fit-content;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .typing-indicator.active {
+            display: block;
+        }
+
+        .typing-indicator span {
+            height: 8px;
+            width: 8px;
+            background: #999;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 5px;
+            animation: typing 1.4s infinite;
+        }
+
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-10px); }
+        }
+
+        .input-container {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #eee;
+            display: flex;
+            gap: 10px;
+        }
+
+        #user-input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 2px solid #eee;
+            border-radius: 25px;
+            font-size: 14px;
+            outline: none;
+            transition: border 0.3s;
+        }
+
+        #user-input:focus {
+            border-color: #667eea;
+        }
+
+        #send-btn {
+            padding: 12px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        #send-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        #send-btn:active {
+            transform: translateY(0);
+        }
+
+        #send-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .example-queries {
+            padding: 10px 20px;
+            background: #f0f0f0;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .example-queries span {
+            display: inline-block;
+            padding: 5px 10px;
+            margin: 5px 5px 5px 0;
+            background: white;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .example-queries span:hover {
+            background: #667eea;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>🏈 NFL Spread Prediction Bot</h1>
+            <p>AI-powered betting insights using historical ATS data</p>
+        </div>
+
+        <div class="example-queries">
+            Try: 
+            <span onclick="setQuery('Who covers GB @ PIT with Packers -2.5?')">GB @ PIT (-2.5)</span>
+            <span onclick="setQuery('Should I bet on Detroit -7.5 at home?')">DET -7.5 home</span>
+            <span onclick="setQuery('Ravens +3 at Buffalo, who covers?')">BAL +3 @ BUF</span>
+        </div>
+
+        <div class="messages" id="messages">
+            <div class="message bot">
+                <div class="message-content">
+                    👋 Hey! I'm your NFL betting analyst. Ask me about any game and I'll predict who covers the spread based on historical ATS data!
+                    <br><br>
+                    Try asking: "Who covers GB @ PIT with Packers -2.5?"
+                </div>
+            </div>
+        </div>
+
+        <div class="typing-indicator" id="typing">
+            <span></span><span></span><span></span>
+        </div>
+
+        <div class="input-container">
+            <input 
+                type="text" 
+                id="user-input" 
+                placeholder="Ask about any NFL game..."
+                onkeypress="handleKeyPress(event)"
+            >
+            <button id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+    <script>
+        // Configuration - UPDATE THESE!
+        const API_URL = 'http://localhost:8000';  // Your API endpoint
+        const OPENAI_KEY = 'YOUR_OPENAI_KEY';     // Your OpenAI API key
+
+        let conversationHistory = [{
+            role: 'system',
+            content: `You are an expert NFL betting analyst chatbot. You help users make informed 
+betting decisions by analyzing spread predictions using historical Against The Spread (ATS) data.
+
+Your predictions are based on three weighted factors:
+1. Situational ATS (40%): How teams perform in similar spread ranges and home/away situations
+2. Overall ATS (30%): Historical cover rate across all games
+3. Home/Away Performance (30%): Win rates based on location
+
+When users ask about a game, explain predictions clearly with confidence levels and key factors.
+Be conversational and friendly but professional.`
+        }];
+
+        function addMessage(content, isUser) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user' : 'bot'}`;
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.innerHTML = content.replace(/\n/g, '<br>');
+            
+            messageDiv.appendChild(contentDiv);
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function showTyping() {
+            document.getElementById('typing').classList.add('active');
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function hideTyping() {
+            document.getElementById('typing').classList.remove('active');
+        }
+
+        async function callOpenAI(userMessage) {
+            conversationHistory.push({
+                role: 'user',
+                content: userMessage
+            });
+
+            const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${OPENAI_KEY}`
+                },
+                body: JSON.stringify({
+                    model: 'gpt-4-turbo-preview',
+                    messages: conversationHistory,
+                    functions: [{
+                        name: 'get_spread_prediction',
+                        description: 'Get AI prediction for which team will cover the spread',
+                        parameters: {
+                            type: 'object',
+                            properties: {
+                                away_team: { type: 'string', description: 'Away team abbreviation' },
+                                home_team: { type: 'string', description: 'Home team abbreviation' },
+                                spread: { type: 'number', description: 'Point spread (negative = away favored)' }
+                            },
+                            required: ['away_team', 'home_team', 'spread']
+                        }
+                    }],
+                    function_call: 'auto'
+                })
+            });
+
+            const data = await response.json();
+            const message = data.choices[0].message;
+
+            // Check if function was called
+            if (message.function_call) {
+                const args = JSON.parse(message.function_call.arguments);
+                const prediction = await getPrediction(args.away_team, args.home_team, args.spread);
+                
+                conversationHistory.push({
+                    role: 'assistant',
+                    content: null,
+                    function_call: message.function_call
+                });
+
+                conversationHistory.push({
+                    role: 'function',
+                    name: 'get_spread_prediction',
+                    content: JSON.stringify(prediction)
+                });
+
+                // Get final response
+                const finalResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${OPENAI_KEY}`
+                    },
+                    body: JSON.stringify({
+                        model: 'gpt-4-turbo-preview',
+                        messages: conversationHistory
+                    })
+                });
+
+                const finalData = await finalResponse.json();
+                return finalData.choices[0].message.content;
+            }
+
+            return message.content;
+        }
+
+        async function getPrediction(awayTeam, homeTeam, spread) {
+            const response = await fetch(`${API_URL}/predict`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    team_a: awayTeam,
+                    team_b: homeTeam,
+                    spread: spread,
+                    team_a_home: false,
+                    seasons: [2024, 2025]
+                })
+            });
+
+            return await response.json();
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('user-input');
+            const message = input.value.trim();
+            
+            if (!message) return;
+
+            // Add user message
+            addMessage(message, true);
+            input.value = '';
+
+            // Disable input
+            input.disabled = true;
+            document.getElementById('send-btn').disabled = true;
+            showTyping();
+
+            try {
+                const response = await callOpenAI(message);
+                hideTyping();
+                addMessage(response, false);
+            } catch (error) {
+                hideTyping();
+                addMessage(`❌ Error: ${error.message}. Make sure your API server is running and OpenAI key is set.`, false);
+            }
+
+            // Re-enable input
+            input.disabled = false;
+            document.getElementById('send-btn').disabled = false;
+            input.focus();
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        function setQuery(query) {
+            document.getElementById('user-input').value = query;
+            document.getElementById('user-input').focus();
+        }
+    </script>
+</body>
+</html>
+

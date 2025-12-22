@@ -1,0 +1,12 @@
+{
+  "rawPath": "/predict",
+  "requestContext": {
+    "http": {
+      "method": "POST"
+    }
+  },
+  "body": "{\"team_a\": \"GB\", \"team_b\": \"HOU\", \"spread\": -1.5, \"team_a_home\": false, \"seasons\": [2024, 2025], \"debug\": true}"
+}
+
+
+
