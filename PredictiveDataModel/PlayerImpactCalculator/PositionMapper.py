@@ -1,291 +1,269 @@
 """
-PositionMapper - Maps raw Sportradar depth chart positions to standardized position keys
+PositionMapper - Standardize NFL position names across data sources
 
-Takes: Raw depth chart JSON from Sportradar
-Returns: Structured position mappings for each team
+Purpose:
+- Convert various position abbreviations to standardized position keys
+- Handle Sportradar's position naming vs Madden's position naming
+- Assign depth chart positions (QB1, QB2, WR1, WR2, etc.)
 
-Example:
-    Input: {"name": "LWR", "depth": 1, "player": "Ja'Marr Chase"}
-    Output: {"position_key": "WR1", "player": "Ja'Marr Chase", "depth_order": 1}
+Standardization:
+- Input: Raw position strings (QB, QUARTERBACK, Quarterback, etc.)
+- Output: Standard position keys (QB, RB, WR, TE, LT, RT, etc.)
 """
 
 import logging
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
 class PositionMapper:
-    """Maps Sportradar positions to standardized position keys (QB1, WR2, EDGE1, etc.)"""
+    """Maps and standardizes NFL position names"""
     
     def __init__(self):
-        """Initialize with position mapping rules"""
+        """Initialize position mapping dictionaries"""
         
-        # Define which raw positions map to which position groups
-        self.OFFENSE_WR_POSITIONS = ['LWR', 'RWR', 'WR']  # Wide receiver variants
-        self.OFFENSE_RB_POSITIONS = ['RB', 'FB']          # Running back variants
-        self.OFFENSE_TE_POSITIONS = ['TE']                # Tight end
-        self.OFFENSE_OL_POSITIONS = ['LT', 'RT', 'LG', 'RG', 'C']  # Offensive line
+        # Map raw positions to standard positions
+        self.position_standardization = {
+            # Quarterbacks
+            'QB': 'QB', 'QUARTERBACK': 'QB', 'Quarterback': 'QB',
+            
+            # Running Backs
+            'RB': 'RB', 'HB': 'RB', 'HALFBACK': 'RB', 'FB': 'RB', 'FULLBACK': 'RB',
+            'Halfback': 'RB', 'Fullback': 'RB', 'Running Back': 'RB',
+            
+            # Wide Receivers
+            'WR': 'WR', 'WIDE RECEIVER': 'WR', 'Wide Receiver': 'WR',
+            'RECEIVER': 'WR', 'Receiver': 'WR',
+            
+            # Tight Ends
+            'TE': 'TE', 'TIGHT END': 'TE', 'Tight End': 'TE',
+            
+            # Offensive Line
+            'LT': 'LT', 'LEFT TACKLE': 'LT', 'Left Tackle': 'LT', 'T': 'T', 'TACKLE': 'T',
+            'RT': 'RT', 'RIGHT TACKLE': 'RT', 'Right Tackle': 'RT',
+            'LG': 'LG', 'LEFT GUARD': 'LG', 'Left Guard': 'LG', 'G': 'G', 'GUARD': 'G',
+            'RG': 'RG', 'RIGHT GUARD': 'RG', 'Right Guard': 'RG',
+            'C': 'C', 'CENTER': 'C', 'Center': 'C',
+            'OL': 'OL', 'OFFENSIVE LINE': 'OL',
+            
+            # Defensive Line
+            'DE': 'EDGE', 'DEFENSIVE END': 'EDGE', 'Defensive End': 'EDGE',
+            'EDGE': 'EDGE', 'DL': 'DL', 'DEFENSIVE LINE': 'DL',
+            'DT': 'DT', 'DEFENSIVE TACKLE': 'DT', 'Defensive Tackle': 'DT',
+            'NT': 'NT', 'NOSE TACKLE': 'NT', 'Nose Tackle': 'NT',
+            
+            # Linebackers
+            'LB': 'LB', 'LINEBACKER': 'LB', 'Linebacker': 'LB',
+            'MLB': 'LB', 'MIDDLE LINEBACKER': 'LB', 'Middle Linebacker': 'LB',
+            'OLB': 'LB', 'OUTSIDE LINEBACKER': 'LB', 'Outside Linebacker': 'LB',
+            'ILB': 'LB', 'INSIDE LINEBACKER': 'LB', 'Inside Linebacker': 'LB',
+            
+            # Secondary
+            'CB': 'CB', 'CORNERBACK': 'CB', 'Cornerback': 'CB',
+            'S': 'S', 'SAFETY': 'S', 'Safety': 'S',
+            'FS': 'S', 'FREE SAFETY': 'S', 'Free Safety': 'S',
+            'SS': 'S', 'STRONG SAFETY': 'S', 'Strong Safety': 'S',
+            'DB': 'CB', 'DEFENSIVE BACK': 'CB',
+            
+            # Special Teams
+            'K': 'K', 'KICKER': 'K', 'Kicker': 'K',
+            'P': 'P', 'PUNTER': 'P', 'Punter': 'P',
+            'LS': 'LS', 'LONG SNAPPER': 'LS', 'Long Snapper': 'LS'
+        }
         
-        self.DEFENSE_EDGE_POSITIONS = ['LDE', 'RDE', 'RUSH', 'DE']  # Edge rushers (different names!)
-        self.DEFENSE_DT_POSITIONS = ['DT', 'NT', 'LDT', 'RDT']      # Defensive tackles
-        self.DEFENSE_LB_POSITIONS = ['MLB', 'WLB', 'SLB', 'LB', 'ILB', 'OLB']  # Linebackers
-        self.DEFENSE_CB_POSITIONS = ['LCB', 'RCB', 'CB', 'NB']      # Cornerbacks
-        self.DEFENSE_S_POSITIONS = ['FS', 'SS', 'S']                # Safeties
+        # Positions that get depth numbering (1, 2, 3, etc.)
+        self.depth_chart_positions = [
+            'QB', 'RB', 'WR', 'TE', 
+            'LT', 'RT', 'LG', 'RG', 'C',
+            'EDGE', 'DT', 'NT', 'LB', 'CB', 'S'
+        ]
+        
+        logger.info("PositionMapper initialized")
     
-    def map_team_depth_chart(self, team_data):
+    def standardize_position(self, raw_position: str) -> str:
         """
-        Map all positions for a single team from raw depth chart
+        Convert raw position string to standardized position
         
         Args:
-            team_data (dict): Single team's data from depth chart API
+            raw_position: Raw position string (e.g., "QUARTERBACK", "Wide Receiver")
             
         Returns:
-            list: Mapped positions with standardized keys
-            
-        Example team_data structure:
-            {
-                "alias": "CIN",
-                "offense": [{"position": {"name": "LWR", "players": [...]}}],
-                "defense": [{"position": {"name": "LDE", "players": [...]}}]
-            }
+            str: Standardized position (e.g., "QB", "WR")
         """
-        mapped_positions = []
-        team_alias = team_data.get('alias')
+        # Clean the input
+        cleaned = raw_position.strip().upper()
         
-        logger.info(f"Mapping positions for team: {team_alias}")
+        # Look up in standardization map
+        standard = self.position_standardization.get(cleaned)
         
-        # Map offense positions
-        mapped_positions.extend(self._map_offense(team_data.get('offense', []), team_alias))
+        if standard:
+            return standard
         
-        # Map defense positions
-        mapped_positions.extend(self._map_defense(team_data.get('defense', []), team_alias))
+        # Fallback: check if it's already standard
+        if cleaned in ['QB', 'RB', 'WR', 'TE', 'LT', 'RT', 'LG', 'RG', 'C', 
+                       'EDGE', 'DT', 'NT', 'LB', 'CB', 'S', 'K', 'P', 'LS']:
+            return cleaned
         
-        logger.info(f"Mapped {len(mapped_positions)} positions for {team_alias}")
-        
-        return mapped_positions
+        # Unknown position
+        logger.warning(f"Unknown position: {raw_position}")
+        return 'UNKNOWN'
     
-    def _map_offense(self, offense_positions, team_alias):
-        """Map offensive positions"""
-        mapped = []
+    def create_position_key(self, position: str, depth_order: int) -> str:
+        """
+        Create position key with depth number (e.g., QB1, WR2)
         
-        # Map wide receivers (WR1, WR2, WR3)
-        mapped.extend(self._map_wide_receivers(offense_positions))
-        
-        # Map other offensive positions with simple 1:1 mapping
-        simple_offense_map = {
-            'QB': 'QB',      # QB depth 1→QB1, depth 2→QB2
-            'RB': 'RB',      # RB depth 1→RB1, depth 2→RB2
-            'FB': 'FB',
-            'TE': 'TE',      # TE depth 1→TE1, depth 2→TE2
-            'LT': 'LT',
-            'RT': 'RT',
-            'LG': 'LG',
-            'RG': 'RG',
-            'C': 'C'
-        }
-        
-        for pos_group in offense_positions:
-            position = pos_group.get('position', {})
-            pos_name = position.get('name')
+        Args:
+            position: Standardized position (e.g., "QB", "WR")
+            depth_order: Depth chart order (1 = starter, 2 = backup, etc.)
             
-            if pos_name in simple_offense_map:
-                base_key = simple_offense_map[pos_name]
-                players = position.get('players', [])
-                
-                for player in players:
-                    depth = player.get('depth', 1)
-                    # Add depth number for positions that have it (QB1, QB2, RB1, RB2, TE1, TE2)
-                    if pos_name in ['QB', 'RB', 'TE']:
-                        position_key = f"{base_key}{depth}"
-                    else:
-                        position_key = base_key
-                    
-                    mapped.append({
-                        'position_key': position_key,
-                        'sportradar_position': pos_name,
-                        'player_id': player.get('id'),
-                        'player_name': player.get('name'),
-                        'depth_order': depth,
-                        'jersey': player.get('jersey'),
-                        'position_group': 'OFFENSE'
-                    })
-        
-        return mapped
+        Returns:
+            str: Position key (e.g., "QB1", "WR2")
+        """
+        # Only add depth number for positions that need it
+        if position in self.depth_chart_positions:
+            return f"{position}{depth_order}"
+        else:
+            return position
     
-    def _map_defense(self, defense_positions, team_alias):
-        """Map defensive positions"""
-        mapped = []
+    def map_team_depth_chart(self, team_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Map entire team's depth chart from Sportradar format
         
-        # Map edge rushers (EDGE1, EDGE2)
-        mapped.extend(self._map_edge_rushers(defense_positions))
+        Args:
+            team_data: Team data from Sportradar depth chart API
+                      Expected structure: {'positions': [...]}
+                      
+        Returns:
+            List of dicts with [player_id, player_name, position, position_key, depth_order]
+        """
+        mapped_players = []
         
-        # Map other defensive positions with simple mapping
-        simple_defense_map = {
-            'DT': 'DT',      # DT depth 1→DT1, depth 2→DT2
-            'NT': 'NT',
-            'LDT': 'DT',     # Left DT → DT
-            'RDT': 'DT',     # Right DT → DT
-            'MLB': 'LB',     # Middle LB → LB1
-            'WLB': 'LB',     # Weak LB → LB
-            'SLB': 'LB',     # Strong LB → LB
-            'LB': 'LB',
-            'ILB': 'LB',
-            'OLB': 'LB',
-            'LCB': 'CB',     # Left CB → CB
-            'RCB': 'CB',     # Right CB → CB
-            'CB': 'CB',
-            'NB': 'CB',      # Nickel back → CB
-            'FS': 'S',       # Free safety → S
-            'SS': 'S',       # Strong safety → S
-            'S': 'S'
-        }
+        positions = team_data.get('positions', [])
         
-        # Track position counters for auto-numbering
-        position_counters = {}
-        
-        for pos_group in defense_positions:
-            position = pos_group.get('position', {})
-            pos_name = position.get('name')
+        for position_group in positions:
+            raw_position = position_group.get('name', 'UNKNOWN')
+            standard_position = self.standardize_position(raw_position)
             
-            # Skip edge positions (already handled)
-            if pos_name in self.DEFENSE_EDGE_POSITIONS:
-                continue
+            # Get players at this position
+            players = position_group.get('players', [])
             
-            if pos_name in simple_defense_map:
-                base_key = simple_defense_map[pos_name]
-                players = position.get('players', [])
+            for depth_order, player in enumerate(players, start=1):
+                player_id = player.get('id')
+                player_name = player.get('name', 'Unknown')
                 
-                for player in players:
-                    depth = player.get('depth', 1)
-                    
-                    # Auto-number: DT1, DT2, LB1, LB2, CB1, CB2, S1, S2
-                    if base_key not in position_counters:
-                        position_counters[base_key] = 0
-                    
-                    if depth == 1:  # Only number starters
-                        position_counters[base_key] += 1
-                        position_key = f"{base_key}{position_counters[base_key]}"
-                    else:
-                        # Backups get base position (e.g., "CB" instead of "CB3")
-                        position_key = base_key
-                    
-                    mapped.append({
-                        'position_key': position_key,
-                        'sportradar_position': pos_name,
-                        'player_id': player.get('id'),
-                        'player_name': player.get('name'),
-                        'depth_order': depth,
-                        'jersey': player.get('jersey'),
-                        'position_group': 'DEFENSE'
-                    })
+                # Create position key with depth
+                position_key = self.create_position_key(standard_position, depth_order)
+                
+                mapped_player = {
+                    'player_id': player_id,
+                    'player_name': player_name,
+                    'position': standard_position,
+                    'position_key': position_key,
+                    'depth_order': depth_order
+                }
+                
+                mapped_players.append(mapped_player)
         
-        return mapped
+        logger.info(f"Mapped {len(mapped_players)} players from depth chart")
+        return mapped_players
     
-    def _map_wide_receivers(self, offense_positions):
+    def map_player_position(self, player_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Map all WR variants (LWR, RWR, WR) to WR1, WR2, WR3
+        Map a single player's position
         
-        Strategy: Use position priority
-        - LWR → WR1
-        - RWR → WR2
-        - WR (slot) → WR3
-        """
-        mapped = []
-        
-        # Position priority mapping
-        wr_position_map = {
-            'LWR': 'WR1',
-            'RWR': 'WR2',
-            'WR': 'WR3'
-        }
-        
-        for pos_group in offense_positions:
-            position = pos_group.get('position', {})
-            pos_name = position.get('name')
+        Args:
+            player_data: Player data with 'position' field
             
-            # Check if this is a WR position
-            if pos_name in wr_position_map:
-                position_key = wr_position_map[pos_name]
-                players = position.get('players', [])
-                
-                # Map each player at this position
-                for player in players:
-                    mapped.append({
-                        'position_key': position_key,
-                        'sportradar_position': pos_name,
-                        'player_id': player.get('id'),
-                        'player_name': player.get('name'),
-                        'depth_order': player.get('depth'),
-                        'jersey': player.get('jersey'),
-                        'position_group': 'OFFENSE'
-                    })
+        Returns:
+            Dict with added 'standard_position' field
+        """
+        raw_position = player_data.get('position', 'UNKNOWN')
+        standard_position = self.standardize_position(raw_position)
         
-        return mapped
+        result = player_data.copy()
+        result['standard_position'] = standard_position
+        
+        return result
     
-    def _map_edge_rushers(self, defense_positions):
+    def is_offensive_position(self, position: str) -> bool:
+        """Check if position is offensive"""
+        offensive = ['QB', 'RB', 'WR', 'TE', 'LT', 'RT', 'LG', 'RG', 'C', 'OL']
+        return position in offensive
+    
+    def is_defensive_position(self, position: str) -> bool:
+        """Check if position is defensive"""
+        defensive = ['EDGE', 'DT', 'NT', 'LB', 'CB', 'S', 'DL', 'DB']
+        return position in defensive
+    
+    def is_key_position(self, position_key: str) -> bool:
         """
-        Map all edge rusher variants (LDE, RDE, RUSH, DE) to EDGE1, EDGE2
+        Check if this is a key impact position
         
-        Strategy: Use position priority
-        - LDE or RUSH → EDGE1
-        - RDE → EDGE2
-        - Generic DE → Sort by depth, assign EDGE1/EDGE2
-        """
-        mapped = []
-        
-        # Position priority mapping
-        edge_position_map = {
-            'LDE': 'EDGE1',
-            'RUSH': 'EDGE1',  # Baltimore uses this
-            'RDE': 'EDGE2'
-        }
-        
-        # Track if we've assigned EDGE1/EDGE2 already
-        edge_assignments = {}
-        
-        for pos_group in defense_positions:
-            position = pos_group.get('position', {})
-            pos_name = position.get('name')
+        Args:
+            position_key: Position with depth (e.g., "QB1", "WR2")
             
-            # Check if this is an edge position
-            if pos_name in self.DEFENSE_EDGE_POSITIONS:
-                players = position.get('players', [])
-                
-                # Get position key from mapping, or handle generic DE
-                if pos_name in edge_position_map:
-                    position_key = edge_position_map[pos_name]
-                elif pos_name == 'DE':
-                    # Generic DE - assign EDGE1 if not taken, else EDGE2
-                    if 'EDGE1' not in edge_assignments:
-                        position_key = 'EDGE1'
-                    else:
-                        position_key = 'EDGE2'
-                else:
-                    continue
-                
-                # Map each player at this position
-                for player in players:
-                    mapped.append({
-                        'position_key': position_key,
-                        'sportradar_position': pos_name,
-                        'player_id': player.get('id'),
-                        'player_name': player.get('name'),
-                        'depth_order': player.get('depth'),
-                        'jersey': player.get('jersey'),
-                        'position_group': 'DEFENSE'
-                    })
-                    
-                    # Track that we've assigned this position
-                    if player.get('depth') == 1:
-                        edge_assignments[position_key] = True
-        
-        return mapped
+        Returns:
+            bool: True if key position
+        """
+        key_positions = ['QB1', 'RB1', 'WR1', 'WR2', 'TE1', 'LT', 'RT', 'C',
+                        'EDGE1', 'EDGE2', 'DT1', 'CB1', 'CB2', 'S1', 'LB1']
+        return position_key in key_positions
 
 
-# Test the mapper with real data
+# Test the mapper
 if __name__ == "__main__":
-    # We can test this with the depth chart data we already fetched
-    print("PositionMapper ready for testing")
-
-
+    print("PositionMapper - Testing...")
+    
+    mapper = PositionMapper()
+    print("✓ Mapper initialized")
+    
+    # Test standardization
+    test_positions = [
+        'QUARTERBACK', 'QB', 'Wide Receiver', 'WR', 
+        'DEFENSIVE END', 'DE', 'CORNERBACK', 'Safety'
+    ]
+    
+    print("\nTesting position standardization:")
+    for raw_pos in test_positions:
+        standard = mapper.standardize_position(raw_pos)
+        print(f"  {raw_pos:20} → {standard}")
+    
+    # Test position key creation
+    print("\nTesting position key creation:")
+    for pos in ['QB', 'WR', 'EDGE', 'CB']:
+        for depth in [1, 2, 3]:
+            key = mapper.create_position_key(pos, depth)
+            print(f"  {pos} depth {depth} → {key}")
+    
+    # Test team depth chart mapping
+    print("\nTesting team depth chart mapping:")
+    sample_team_data = {
+        'id': 'team123',
+        'name': 'Test Team',
+        'positions': [
+            {
+                'name': 'QB',
+                'players': [
+                    {'id': 'player1', 'name': 'Test QB1'},
+                    {'id': 'player2', 'name': 'Test QB2'}
+                ]
+            },
+            {
+                'name': 'WR',
+                'players': [
+                    {'id': 'player3', 'name': 'Test WR1'},
+                    {'id': 'player4', 'name': 'Test WR2'},
+                    {'id': 'player5', 'name': 'Test WR3'}
+                ]
+            }
+        ]
+    }
+    
+    mapped = mapper.map_team_depth_chart(sample_team_data)
+    print(f"  Mapped {len(mapped)} players")
+    for player in mapped:
+        print(f"    {player['position_key']:6} - {player['player_name']}")
+    
+    print("\n✓ All tests passed")

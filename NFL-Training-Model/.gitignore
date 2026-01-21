@@ -1,0 +1,41 @@
+# Environment
+.env
+venv/
+env/
+*.pyc
+__pycache__/
+
+# Training Data
+training_data.csv
+*.csv
+*.pkl
+*.joblib
+
+# Model Files
+models/
+*.model
+*.json
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+

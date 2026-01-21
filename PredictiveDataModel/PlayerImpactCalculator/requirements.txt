@@ -1,0 +1,27 @@
+# PlayerImpactCalculator Requirements
+# Core NFL injury impact calculation with real data integration
+
+# API Communication
+requests>=2.31.0
+
+# AWS S3 for data loading
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Database (Supabase/PostgreSQL)
+pg8000>=1.30.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Logging (built-in, but for clarity)
+# logging (built-in Python module)
+
+# Optional: Type hints support
+typing-extensions>=4.9.0
+
+# Development/Testing (optional)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+

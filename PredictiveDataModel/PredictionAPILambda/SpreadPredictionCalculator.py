@@ -310,6 +310,107 @@ class SpreadPredictionCalculator:
             'underdog_normalized': und_normalized
         }
     
+    def _calc_recent_form(self, favored: str, underdog: str, seasons: list) -> Dict:
+        """Calculate last 5 games win rate for both teams using rolling window"""
+        conn = self.db.get_connection()
+        
+        # Query to get all games for both teams
+        query = """
+        SELECT 
+            game_id,
+            season,
+            week,
+            gameday,
+            home_team,
+            away_team,
+            home_score,
+            away_score
+        FROM games 
+        WHERE season = ANY(:seasons)
+            AND (home_team IN (:fav, :und) OR away_team IN (:fav, :und))
+            AND game_type = 'REG'
+            AND home_score IS NOT NULL
+            AND away_score IS NOT NULL
+        ORDER BY gameday, game_id
+        """
+        
+        data = conn.run(query, seasons=seasons, fav=favored, und=underdog)
+        
+        if not data:
+            return {
+                'favored_rate': 0.5,
+                'underdog_rate': 0.5,
+                'favored_normalized': 0.5,
+                'underdog_normalized': 0.5,
+                'favored_record': 'N/A',
+                'underdog_record': 'N/A'
+            }
+        
+        # Convert to DataFrame
+        columns = ['game_id', 'season', 'week', 'gameday', 
+                   'home_team', 'away_team', 'home_score', 'away_score']
+        games_df = pd.DataFrame(data, columns=columns)
+        
+        # HOME PERSPECTIVE
+        home_games = games_df.copy()
+        home_games['team'] = games_df['home_team']
+        home_games['gameday'] = games_df['gameday']
+        home_games['won'] = games_df['home_score'] > games_df['away_score']
+        
+        # AWAY PERSPECTIVE
+        away_games = games_df.copy()
+        away_games['team'] = games_df['away_team']
+        away_games['gameday'] = games_df['gameday']
+        away_games['won'] = games_df['away_score'] > games_df['home_score']
+        
+        # COMBINE
+        all_games = pd.concat([home_games, away_games], ignore_index=True)
+        all_games = all_games.sort_values(by=['team', 'gameday'])
+        
+        # Calculate rolling window stats (shift by 1 to get previous 5 games)
+        all_games['wins_last_5'] = (
+            all_games
+            .groupby('team')['won']
+            .transform(lambda x: x.shift(1).rolling(5, min_periods=1).sum())
+        )
+        all_games['games_last_5'] = (
+            all_games.groupby('team')['won']
+            .transform(lambda x: x.shift(1).rolling(5, min_periods=1).count())
+        )
+        all_games['form_rate'] = all_games['wins_last_5'] / all_games['games_last_5']
+        
+        # Get most recent form_rate for each team
+        latest_form = all_games.groupby('team').tail(1)
+        
+        # Extract favored and underdog stats
+        fav_form = latest_form[latest_form['team'] == favored]
+        und_form = latest_form[latest_form['team'] == underdog]
+        
+        # Get rates and records
+        fav_rate = float(fav_form['form_rate'].iloc[0]) if not fav_form.empty else 0.5
+        fav_wins = int(fav_form['wins_last_5'].iloc[0]) if not fav_form.empty else 0
+        fav_games = int(fav_form['games_last_5'].iloc[0]) if not fav_form.empty else 0
+        fav_losses = fav_games - fav_wins
+        
+        und_rate = float(und_form['form_rate'].iloc[0]) if not und_form.empty else 0.5
+        und_wins = int(und_form['wins_last_5'].iloc[0]) if not und_form.empty else 0
+        und_games = int(und_form['games_last_5'].iloc[0]) if not und_form.empty else 0
+        und_losses = und_games - und_wins
+        
+        # Normalize
+        total_rate = fav_rate + und_rate
+        fav_normalized = fav_rate / total_rate if total_rate > 0 else 0.5
+        und_normalized = und_rate / total_rate if total_rate > 0 else 0.5
+        
+        return {
+            'favored_rate': round(fav_rate, 3),
+            'favored_record': f"{fav_wins}-{fav_losses}",
+            'underdog_rate': round(und_rate, 3),
+            'underdog_record': f"{und_wins}-{und_losses}",
+            'favored_normalized': fav_normalized,
+            'underdog_normalized': und_normalized
+        }
+    
     def _calc_home_away_performance(
         self, 
         favored: str, 
