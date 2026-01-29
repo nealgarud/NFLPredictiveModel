@@ -1,0 +1,191 @@
+"""
+Player Impact Lambda Handler
+Calculate player impact for a game using Madden ratings and Sportradar API
+"""
+
+import json
+import os
+import logging
+import pandas as pd
+from typing import Dict, Any
+
+# Import local modules
+from S3DataLoader import S3DataLoader
+from PlayerWeightAssigner import PlayerWeightAssigner
+from PositionMapper import PositionMapper
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Global cache for warm starts
+_s3_loader = None
+_weight_assigner = None
+_cached_madden_ratings = {}
+
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda handler for player impact calculation
+    
+    Event format:
+    {
+        "team_a": "BAL",
+        "team_b": "BUF",
+        "season": 2024
+    }
+    
+    Returns:
+    {
+        "team_a_impact": 85.5,
+        "team_b_impact": 82.3,
+        "differential": 3.2,
+        "advantage": "team_a"
+    }
+    """
+    global _s3_loader, _weight_assigner, _cached_madden_ratings
+    
+    try:
+        # Initialize on cold start
+        if _s3_loader is None:
+            bucket_name = os.environ.get('PLAYER_DATA_BUCKET', 'sportsdatacollection')
+            _s3_loader = S3DataLoader(bucket_name=bucket_name)
+            _weight_assigner = PlayerWeightAssigner()
+            logger.info(f"Cold start - Initialized with bucket: {bucket_name}")
+        else:
+            logger.info("Warm start - Using cached instances")
+        
+        # Parse event
+        team_a = event['team_a'].upper()
+        team_b = event['team_b'].upper()
+        season = event.get('season', 2024)
+        
+        logger.info(f"Calculating impact: {team_a} vs {team_b} (Season {season})")
+        
+        # Load Madden ratings (cached per season)
+        if season not in _cached_madden_ratings:
+            logger.info(f"Loading Madden ratings for season {season}")
+            madden_data = _s3_loader.load_madden_ratings(season)
+            _cached_madden_ratings[season] = madden_data
+        else:
+            logger.info(f"Using cached Madden ratings for season {season}")
+            madden_data = _cached_madden_ratings[season]
+        
+        # Calculate player weights for both teams
+        # Try filtering by team (case insensitive and partial match)
+        if not madden_data.empty:
+            # Log available teams for debugging
+            unique_teams = madden_data['team'].unique() if 'team' in madden_data.columns else []
+            logger.info(f"Available teams in Madden data: {unique_teams[:10]}")  # Show first 10
+            
+            # Filter teams (try exact match, then partial match)
+            team_a_players = madden_data[madden_data['team'].str.upper() == team_a]
+            team_b_players = madden_data[madden_data['team'].str.upper() == team_b]
+            
+            logger.info(f"Found {len(team_a_players)} players for {team_a}")
+            logger.info(f"Found {len(team_b_players)} players for {team_b}")
+        else:
+            team_a_players = pd.DataFrame()
+            team_b_players = pd.DataFrame()
+        
+        team_a_impact = _calculate_team_impact(team_a_players, _weight_assigner)
+        team_b_impact = _calculate_team_impact(team_b_players, _weight_assigner)
+        
+        differential = team_a_impact - team_b_impact
+        advantage = team_a if differential > 0 else team_b if differential < 0 else "neutral"
+        
+        logger.info(f"✓ Impact calculated: {team_a}={team_a_impact:.2f}, {team_b}={team_b_impact:.2f}, diff={differential:.2f}")
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'success': True,
+                'team_a': team_a,
+                'team_b': team_b,
+                'season': season,
+                'team_a_impact': round(team_a_impact, 2),
+                'team_b_impact': round(team_b_impact, 2),
+                'differential': round(differential, 2),
+                'advantage': advantage
+            })
+        }
+    
+    except KeyError as e:
+        logger.error(f"Missing required field: {e}")
+        return {
+            'statusCode': 400,
+            'body': json.dumps({
+                'success': False,
+                'error': f'Missing required field: {e}'
+            })
+        }
+    
+    except Exception as e:
+        logger.error(f"Error calculating player impact: {str(e)}", exc_info=True)
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'success': False,
+                'error': str(e)
+            })
+        }
+
+
+def _calculate_team_impact(team_players, weight_assigner):
+    """Calculate total team impact score"""
+    if len(team_players) == 0:
+        return 0.0
+    
+    total_impact = 0.0
+    player_count = 0
+    
+    # Convert DataFrame to list of dicts for PlayerWeightAssigner
+    players_list = []
+    for _, player in team_players.iterrows():
+        # Create player dict in expected format
+        player_dict = {
+            'player_id': player.get('player_id', 'unknown'),
+            'position_key': player.get('position', 'Unknown'),
+            'depth_order': 1,  # Simplified - assume all starters
+            'overallrating': player.get('overallrating', 70)
+        }
+        players_list.append(player_dict)
+    
+    # Use PlayerWeightAssigner to calculate weights
+    if len(players_list) > 0:
+        weighted_players = weight_assigner.assign_weights(players_list)
+        
+        # DEBUG: Log first 3 players to see structure
+        if len(weighted_players) > 0:
+            logger.info(f"Sample weighted player: {weighted_players[0]}")
+            logger.info(f"Sample keys: {weighted_players[0].keys()}")
+        
+        # Sum up all player weights
+        for player in weighted_players:
+            weight = player.get('weight', 0)
+            rating = player.get('overallrating', 0)
+            impact = weight * rating
+            
+            logger.debug(f"Player impact calculation: weight={weight}, rating={rating}, impact={impact}")
+            
+            total_impact += impact
+            player_count += 1
+        
+        logger.info(f"Total raw impact: {total_impact}, Player count: {player_count}")
+    
+    # Return average impact per player
+    avg_impact = total_impact / player_count if player_count > 0 else 0
+    
+    return avg_impact
+
+
+# For local testing
+if __name__ == "__main__":
+    test_event = {
+        "team_a": "BAL",
+        "team_b": "BUF",
+        "season": 2024
+    }
+    
+    result = lambda_handler(test_event, None)
+    print(json.dumps(json.loads(result['body']), indent=2))
+

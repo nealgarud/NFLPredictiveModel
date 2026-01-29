@@ -1,0 +1,15 @@
+# Player Impact Lambda Requirements
+
+# AWS S3
+boto3>=1.34.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# API Communication (Sportradar)
+requests>=2.31.0
+
+# Database (Supabase)
+pg8000>=1.30.0
+

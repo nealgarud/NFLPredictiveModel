@@ -1,0 +1,5 @@
+# Dependencies (should be in Lambda Layer)
+pandas
+boto3
+pg8000
+
