@@ -1,29 +1,16 @@
-# AWS Lambda Dependencies for NFL Predictive Model
-# Last updated: 2025-10-29
+# Predictive Data Model Lambda Requirements
+
+# Machine Learning
+xgboost>=2.0.3
+scikit-learn>=1.3.2
+joblib>=1.3.2
 
 # Data Processing
-pandas==2.0.3
-numpy==1.24.3
+pandas>=2.0.0
+numpy>=1.24.0
 
-# AWS Services
-boto3==1.28.85
-botocore==1.31.85
+# Database (Supabase)
+pg8000>=1.30.0
 
-# Database (pure Python, works on Lambda)
-pg8000==1.30.3
-
-# API Server (for chatbot backend)
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-
-# AI/ML
-openai==1.3.7
-
-# HTTP Requests
-requests==2.31.0
-
-# Note: For Lambda deployment, use psycopg2-binary for Lambda layers
-# or compile psycopg2 for Amazon Linux 2023 (AL2023)
-
-
+# AWS (boto3 included in Lambda runtime, but specify if needed)
+boto3>=1.34.0

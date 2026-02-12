@@ -38,11 +38,10 @@ class PlayerImpactFeature:
     
     def __init__(self, bucket_name: str = 'player-data-nfl-predictive-model'):
         """
-        Initialize with S3 bucket for player/Madden data
+        Initialize with S3 bucket for Madden data
         
         Args:
-            bucket_name: S3 bucket containing player data CSVs
-                        Default: player-data-nfl-predictive-model
+            bucket_name: S3 bucket containing Madden CSVs
         """
         self.bucket_name = bucket_name
         self.s3_loader = S3DataLoader(bucket_name=bucket_name)
@@ -51,6 +50,7 @@ class PlayerImpactFeature:
         self._madden_df: Optional[pd.DataFrame] = None
         self._player_weights: Dict[str, Dict] = {}  # {player_id: {weight, tier, position}}
         self._team_rosters: Dict[str, list] = {}  # {team_abbr: [player_dicts]}
+        self._cached_season: Optional[int] = None  # Track which season is loaded
         
         logger.info(f"PlayerImpactFeature initialized (bucket: {bucket_name})")
     
@@ -71,7 +71,8 @@ class PlayerImpactFeature:
         
         logger.info(f"Loading Madden ratings for {season} from S3...")
         self._madden_df = self.s3_loader.load_madden_ratings(season=season)
-        logger.info(f"✓ Loaded {len(self._madden_df)} player ratings")
+        self._cached_season = season  # Track loaded season
+        logger.info(f"✓ Loaded {len(self._madden_df)} player ratings from {season}.csv")
         
         return self._madden_df
     
@@ -381,7 +382,7 @@ def lambda_handler(event, context):
     {
         "team_a": "KC",
         "team_b": "GB",
-        "season": 2025
+        "season": 2024
     }
     
     Returns:
@@ -396,19 +397,25 @@ def lambda_handler(event, context):
     global _feature_instance
     
     try:
-        # Initialize on cold start (reuse across warm invocations)
-        if _feature_instance is None:
-            logger.info("Cold start - Initializing PlayerImpactFeature...")
-            _feature_instance = PlayerImpactFeature(bucket_name='player-data-nfl-predictive-model')
-            _feature_instance.calculate_player_weights(season=2025)
-            logger.info("✓ Feature initialized with player weights cached")
-        else:
-            logger.info("Warm start - Using cached feature instance")
-        
-        # Parse event
+        # Parse event first to get season
         team_a = event.get('team_a')
         team_b = event.get('team_b')
-        season = event.get('season', 2025)
+        season = event.get('season', 2024)  # Default to 2024
+        
+        # Initialize on cold start OR if season changes
+        if _feature_instance is None:
+            logger.info(f"Cold start - Initializing PlayerImpactFeature for season {season}...")
+            bucket_name = os.environ.get('PLAYER_DATA_BUCKET', 'sportsdatacollection')
+            _feature_instance = PlayerImpactFeature(bucket_name=bucket_name)
+            _feature_instance.calculate_player_weights(season=season)
+            logger.info(f"✓ Feature initialized with {season} player weights cached from bucket {bucket_name}")
+        else:
+            logger.info(f"Warm start - Using cached feature instance (season {season})")
+            # Reload weights if different season requested
+            if not hasattr(_feature_instance, '_cached_season') or _feature_instance._cached_season != season:
+                logger.info(f"Season changed to {season} - reloading player weights...")
+                _feature_instance.calculate_player_weights(season=season)
+                _feature_instance._cached_season = season
         
         # Validate input
         if not team_a or not team_b:

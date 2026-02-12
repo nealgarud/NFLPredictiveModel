@@ -1,0 +1,12 @@
+# QB PFF Lambda Requirements
+# Python 3.11 runtime
+
+# Database connectivity
+pg8000==1.30.3
+
+# AWS SDK
+boto3==1.34.19
+botocore==1.34.19
+
+# No pandas needed - we're using native Python for CSV parsing
+

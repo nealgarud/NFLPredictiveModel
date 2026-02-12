@@ -65,13 +65,22 @@ if (-not ($files -contains "PlayerImpactFeature.py")) {
         }
     }
     
-    # CRITICAL: Copy PlayerImpactFeature to root
-    if (Test-Path "PredictionAPILambda\PlayerImpactFeature.py") {
-        Copy-Item "PredictionAPILambda\PlayerImpactFeature.py" lambda_package\
-        Write-Host "[OK] Copied PlayerImpactFeature.py to package root" -ForegroundColor Green
-    } else {
-        Write-Host "[ERROR] Source file not found: PredictionAPILambda\PlayerImpactFeature.py" -ForegroundColor Red
-        exit 1
+    # CRITICAL: Copy Lambda handler files to root
+    $handlers = @(
+        "PredictionAPILambda\HistoricalGamesBatchProcessor.py",
+        "PredictionAPILambda\PlayerImpactGameProcessor.py",
+        "PredictionAPILambda\PlayerImpactFeature.py",
+        "PredictionAPILambda\player_impact_integration.py"
+    )
+    
+    foreach ($handler in $handlers) {
+        if (Test-Path $handler) {
+            $filename = Split-Path $handler -Leaf
+            Copy-Item $handler lambda_package\
+            Write-Host "[OK] Copied $filename to package root" -ForegroundColor Green
+        } else {
+            Write-Host "[WARN] $handler not found (may be optional)" -ForegroundColor Yellow
+        }
     }
     
     # Create new ZIP

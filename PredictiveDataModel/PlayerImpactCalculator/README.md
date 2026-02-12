@@ -47,7 +47,7 @@ SportradarClient → PositionMapper → S3DataLoader (Madden) → PlayerWeightAs
 **API Configuration:**
 ```bash
 # Environment variables
-SPORTRADAR_API_KEY=Passw0rdbr0!
+SPORTRADAR_API_KEY=bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm
 SPORTRADAR_BASE_URL=https://api.sportradar.com/nfl/official/trial/v7/en
 ```
 
@@ -273,7 +273,7 @@ pip install -r requirements.txt
 2. Set environment variables:
 ```bash
 # Sportradar API
-export SPORTRADAR_API_KEY=Passw0rdbr0!
+export SPORTRADAR_API_KEY=bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm
 
 # Supabase Database
 export SUPABASE_DB_HOST=db.xxx.supabase.co
@@ -300,7 +300,7 @@ from S3DataLoader import S3DataLoader
 from SupabaseStorage import SupabaseStorage
 
 # Initialize components
-client = SportradarClient(api_key='Passw0rdbr0!')
+client = SportradarClient(api_key='bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm')
 s3_loader = S3DataLoader(bucket_name='sportsdatacollection')
 storage = SupabaseStorage()
 
@@ -407,7 +407,7 @@ def _calculate_position_weight(self, rating, position):
 ## 📝 Data Sources & Requirements
 
 ### Sportradar API
-- **API Key:** `Passw0rdbr0!`
+- **API Key:** `bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm`
 - **Base URL:** `https://api.sportradar.com/nfl/official/trial/v7/en`
 - **Endpoints Used:**
   - `/seasons/{year}/{type}/{week}/depth_charts.json`

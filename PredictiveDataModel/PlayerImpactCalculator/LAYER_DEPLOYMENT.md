@@ -91,7 +91,7 @@ aws lambda publish-layer-version \
 
 9. **Environment variables:**
    ```
-   SPORTRADAR_API_KEY=Passw0rdbr0!
+   SPORTRADAR_API_KEY=bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm
    (Optional: Supabase vars if using DB)
    ```
 

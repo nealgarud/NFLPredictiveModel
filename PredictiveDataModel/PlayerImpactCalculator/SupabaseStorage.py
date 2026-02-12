@@ -34,15 +34,24 @@ class SupabaseStorage:
             logger.info("Connecting to Supabase...")
             
             # Create SSL context
+            # Validate required environment variables
+            db_host = os.environ.get('SUPABASE_DB_HOST')
+            db_password = os.environ.get('SUPABASE_DB_PASSWORD')
+            
+            if not db_host:
+                raise ValueError("SUPABASE_DB_HOST environment variable must be set")
+            if not db_password:
+                raise ValueError("SUPABASE_DB_PASSWORD environment variable must be set")
+            
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
             
             connection = pg8000.native.Connection(
-                host=os.environ.get('SUPABASE_DB_HOST'),
+                host=db_host,
                 database=os.environ.get('SUPABASE_DB_NAME', 'postgres'),
                 user=os.environ.get('SUPABASE_DB_USER', 'postgres'),
-                password=os.environ.get('SUPABASE_DB_PASSWORD'),
+                password=db_password,
                 port=int(os.environ.get('SUPABASE_DB_PORT', 5432)),
                 timeout=30,
                 ssl_context=ssl_context

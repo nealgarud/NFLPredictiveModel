@@ -12,7 +12,7 @@ Successfully integrated **REAL DATA** into the PlayerImpactCalculator system. Th
 - Fetches live NFL data from Sportradar API
 - Endpoints: depth charts, injuries, game rosters, player profiles
 - Built-in rate limiting (1 req/sec for trial API)
-- API Key: `Passw0rdbr0!`
+- API Key: `bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm`
 
 ### 2. **S3DataLoader.py**
 - Loads historical game data from S3 (2022, 2023, 2024)
@@ -131,7 +131,7 @@ Tracks which players were inactive each game
 ## 🔑 Data Sources Configured
 
 ### Sportradar API
-- **API Key:** `Passw0rdbr0!`
+- **API Key:** `bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm`
 - **Base URL:** `https://api.sportradar.com/nfl/official/trial/v7/en`
 - **Endpoints Used:**
   - `/seasons/{year}/{type}/{week}/injuries.json`
@@ -165,7 +165,7 @@ pip install -r requirements.txt
 
 2. **Set environment variables:**
 ```bash
-export SPORTRADAR_API_KEY=Passw0rdbr0!
+export SPORTRADAR_API_KEY=bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm
 export SUPABASE_DB_HOST=db.xxx.supabase.co
 export SUPABASE_DB_PASSWORD=your_password
 # Set AWS credentials if not using IAM roles
@@ -195,7 +195,7 @@ from InjuryImpactCalculator import InjuryImpactCalculator
 from game_processor import GameProcessor
 
 # Initialize with real data
-client = SportradarClient(api_key='Passw0rdbr0!')
+client = SportradarClient(api_key='bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm')
 loader = S3DataLoader(bucket_name='sportsdatacollection')
 storage = SupabaseStorage()
 
@@ -266,7 +266,7 @@ Run these to verify everything works:
 
 ```bash
 # Sportradar
-SPORTRADAR_API_KEY=Passw0rdbr0!
+SPORTRADAR_API_KEY=bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm
 
 # AWS S3
 AWS_ACCESS_KEY_ID=your_key

@@ -146,7 +146,7 @@ aws lambda update-function-code \
 
 **Environment Variables:**
 ```
-SPORTRADAR_API_KEY=Passw0rdbr0!
+SPORTRADAR_API_KEY=bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm
 SUPABASE_DB_HOST=db.xxx.supabase.co
 SUPABASE_DB_PASSWORD=your_password
 SUPABASE_DB_NAME=postgres
@@ -413,7 +413,7 @@ aws lambda create-function \
 # 3. Set environment variables
 aws lambda update-function-configuration \
     --function-name PlayerImpactProcessor \
-    --environment Variables="{SPORTRADAR_API_KEY=Passw0rdbr0!}"
+    --environment Variables="{SPORTRADAR_API_KEY=bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm}"
 
 # 4. Test
 aws lambda invoke \

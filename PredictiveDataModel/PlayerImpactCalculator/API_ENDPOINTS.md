@@ -2,7 +2,7 @@
 
 Complete reference for all Sportradar NFL API endpoints used in PlayerImpactCalculator.
 
-**API Key:** `Passw0rdbr0!`  
+**API Key:** `bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm`  
 **Base URL:** `https://api.sportradar.com/nfl/official/trial/v7/en`
 
 ---
@@ -16,7 +16,7 @@ Complete reference for all Sportradar NFL API endpoints used in PlayerImpactCalc
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/seasons/2025/REG/10/schedule.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_weekly_schedule(season=2025, week=10, season_type='REG')`
@@ -56,7 +56,7 @@ curl --request GET \
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/seasons/2025/REG/10/depth_charts.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_depth_chart(season=2025, week=10, season_type='REG')`
@@ -72,7 +72,7 @@ curl --request GET \
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/seasons/2025/REG/10/injuries.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_injuries(season=2025, week=10, season_type='REG')`
@@ -88,7 +88,7 @@ curl --request GET \
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/games/ca9d8f84-8e7b-4ee7-a310-54c2e3ca4edc/roster.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_game_roster(game_id='ca9d8f84-8e7b-4ee7-a310-54c2e3ca4edc')`
@@ -126,7 +126,7 @@ curl --request GET \
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/seasons/2025/REG/schedule.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_season_schedule(season=2025, season_type='REG')`
@@ -142,7 +142,7 @@ curl --request GET \
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/games/ca9d8f84-8e7b-4ee7-a310-54c2e3ca4edc/summary.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_game_summary(game_id='ca9d8f84-8e7b-4ee7-a310-54c2e3ca4edc')`
@@ -158,7 +158,7 @@ curl --request GET \
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/teams/TEAM-UUID/full_roster.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_team_roster(team_id='team-uuid', season=2025)`
@@ -174,7 +174,7 @@ curl --request GET \
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/players/PLAYER-UUID/profile.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_player_profile(player_id='player-uuid')`
@@ -190,7 +190,7 @@ curl --request GET \
 curl --request GET \
      --url https://api.sportradar.com/nfl/official/trial/v7/en/seasons/2025/REG/standings.json \
      --header 'accept: application/json' \
-     --header 'x-api-key: Passw0rdbr0!'
+     --header 'x-api-key: bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm'
 ```
 
 **Method:** `client.get_standings(season=2025, season_type='REG')`
@@ -205,7 +205,7 @@ curl --request GET \
 ```python
 from SportradarClient import SportradarClient
 
-client = SportradarClient(api_key='Passw0rdbr0!')
+client = SportradarClient(api_key='bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm')
 
 # 1. Get game info from schedule
 schedule = client.get_weekly_schedule(2025, 10, 'REG')
@@ -328,7 +328,7 @@ This will:
 - **Rate Limits:** Check your dashboard at https://developer.sportradar.com
 
 **Already Configured:**
-- ✅ API Key: `Passw0rdbr0!`
+- ✅ API Key: `bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm`
 - ✅ Rate limiting built-in
 - ✅ Error handling included
 - ✅ Logging for all requests

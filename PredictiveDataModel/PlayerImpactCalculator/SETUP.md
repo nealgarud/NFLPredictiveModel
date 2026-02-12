@@ -32,7 +32,7 @@ Edit `.env` and fill in your credentials:
 
 ```bash
 # Sportradar API
-SPORTRADAR_API_KEY=Passw0rdbr0!
+SPORTRADAR_API_KEY=bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm
 
 # AWS S3
 AWS_ACCESS_KEY_ID=your_key
@@ -86,7 +86,7 @@ This creates three tables:
 ```python
 from SportradarClient import SportradarClient
 
-client = SportradarClient(api_key='Passw0rdbr0!')
+client = SportradarClient(api_key='bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm')
 
 # Fetch 2025 Week 10 injuries
 injuries = client.get_injuries(season=2025, week=10, season_type='REG')
@@ -111,7 +111,7 @@ This will:
 
 ### Sportradar API
 
-**API Key:** `Passw0rdbr0!`
+**API Key:** `bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm`
 
 **Available Endpoints:**
 ```
@@ -207,7 +207,7 @@ python test_setup.py
 
 ### Sportradar API Key
 
-Already provided: `Passw0rdbr0!`
+Already provided: `bJWOnSi5MAUjzTVHr8gVELZIugdi1IHkVXUMT0Xm`
 
 Or get your own:
 1. Go to https://developer.sportradar.com

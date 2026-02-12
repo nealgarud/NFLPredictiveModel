@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Deployment
+*.zip
+*.whl
+
+# Dependencies (installed locally - not needed with layers)
+pg8000/
+boto3/
+botocore/
+*.dist-info/
+python/  # Lambda layer directory
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+

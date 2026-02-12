@@ -1,0 +1,10 @@
+# Chatbot API Lambda Requirements
+
+# AWS SDK (for invoking other Lambdas)
+boto3>=1.34.0
+
+# If using FastAPI + Mangum (optional):
+# fastapi>=0.109.0
+# mangum>=0.17.0
+# pydantic>=2.5.0
+

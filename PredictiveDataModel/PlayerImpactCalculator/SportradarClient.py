@@ -248,7 +248,11 @@ if __name__ == "__main__":
     
     # Test initialization
     try:
-        client = SportradarClient(api_key="Passw0rdbr0!")
+        test_api_key = os.environ.get('SPORTRADAR_API_KEY')
+        if not test_api_key:
+            print("✗ SPORTRADAR_API_KEY environment variable not set")
+            exit(1)
+        client = SportradarClient(api_key=test_api_key)
         print("✓ Client initialized")
         
         # Test injury fetch (2025 REG Week 10)
