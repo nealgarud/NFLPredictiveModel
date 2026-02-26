@@ -1,0 +1,38 @@
+{
+  "test_1_single_week": {
+    "description": "Process all games from Week 1 of 2024 season",
+    "event": {
+      "season": 2024,
+      "week": 1
+    }
+  },
+  "test_2_limited_batch": {
+    "description": "Process first 5 games from 2024 season",
+    "event": {
+      "season": 2024,
+      "limit": 5
+    }
+  },
+  "test_3_full_season": {
+    "description": "Process all games from 2023 season (may take several minutes)",
+    "event": {
+      "season": 2023
+    }
+  },
+  "test_4_single_game": {
+    "description": "Test single game (requires actual game_id and sportradar_id)",
+    "event": {
+      "game_id": "2024_10_BUF_KC",
+      "sportradar_id": "replace-with-actual-sportradar-uuid",
+      "season": 2024,
+      "week": 10,
+      "home_team": "KC",
+      "away_team": "BUF"
+    },
+    "notes": "Replace sportradar_id with actual UUID from game_id_mapping table"
+  },
+  "test_5_all_games": {
+    "description": "Process all games in game_id_mapping with sportradar_id",
+    "event": {}
+  }
+}

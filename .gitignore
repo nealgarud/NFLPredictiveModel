@@ -29,6 +29,7 @@ env/
 
 # AWS Lambda
 lambda_package/
+package/
 *.zip
 
 # IDE
