@@ -1,405 +1,230 @@
 """
-Generate Training Data for XGBoost Model
-Pulls all features from Supabase and creates training dataset
+Generate Training Data for XGBoost NFL Spread Prediction
 
-This script:
-1. Fetches all completed games (2022-2025) from Supabase
-2. Extracts features (recent form, divisional ATS, player impact, etc.)
-3. Creates target variable (favorite_covered: 1 or 0)
-4. Saves to training_data.csv
+Joins 4 Supabase tables into one flat CSV:
+  - games              (game results, spread lines)
+  - game_id_mapping    (player impact scores per game)
+  - team_rankings      (season-level team stats & rankings)
+  - team_season_features (situational records: primetime, vs strong/weak, ATS)
+
+Output: training_data.csv  (one row per game, ~700 rows for 2022-2024)
 """
 
 import os
-import sys
+import pg8000
 import pandas as pd
 import numpy as np
 import logging
-from datetime import datetime
+from dotenv import load_dotenv
 
-# Add parent directory to path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-
-# Import database connection
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'PredictionAPILambda'))
-from DatabaseConnection import DatabaseConnection
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# 1. DATABASE CONNECTION
+#    pg8000 is a pure-Python PostgreSQL driver. We point it at Supabase.
+#    Credentials come from a .env file so we never hardcode secrets.
+# ---------------------------------------------------------------------------
 
-class TrainingDataGenerator:
-    """Generate training dataset from Supabase for XGBoost"""
-    
-    def __init__(self):
-        """Initialize database connection"""
-        self.db = DatabaseConnection()
-        logger.info("✓ Database connection initialized")
-    
-    def fetch_games_with_features(self, seasons=[2022, 2023, 2024, 2025]):
-        """
-        Fetch all games with spread data and calculate features
-        
-        Returns:
-            pd.DataFrame: Training data with features and target
-        """
-        conn = self.db.get_connection()
-        
-        # Query to get all games with spread data
-        query = """
-        SELECT 
-            g.game_id,
-            g.season,
-            g.week,
-            g.gameday,
-            g.home_team,
-            g.away_team,
-            g.home_score,
-            g.away_score,
-            s.spread_favorite,
-            s.spread_line,
-            s.home_moneyline,
-            s.away_moneyline,
-            s.over_under,
-            g.roof,
-            g.surface,
-            g.game_type
-        FROM games g
-        LEFT JOIN spreads s ON g.game_id = s.game_id
-        WHERE g.season = ANY(:seasons)
-            AND g.game_type = 'REG'
-            AND g.home_score IS NOT NULL
-            AND g.away_score IS NOT NULL
-            AND s.spread_line IS NOT NULL
-        ORDER BY g.gameday, g.game_id
-        """
-        
-        logger.info(f"Fetching games for seasons: {seasons}")
-        data = conn.run(query, seasons=seasons)
-        
-        if not data:
-            logger.error("No games found!")
-            return pd.DataFrame()
-        
-        columns = [
-            'game_id', 'season', 'week', 'gameday', 
-            'home_team', 'away_team', 'home_score', 'away_score',
-            'spread_favorite', 'spread_line', 'home_moneyline', 
-            'away_moneyline', 'over_under', 'roof', 'surface', 'game_type'
-        ]
-        
-        df = pd.DataFrame(data, columns=columns)
-        logger.info(f"✓ Fetched {len(df)} games with spread data")
-        
-        return df
-    
-    def calculate_target(self, df):
-        """
-        Calculate target variable: favorite_covered (1 or 0)
-        
-        Args:
-            df: DataFrame with game data
-            
-        Returns:
-            DataFrame with target column added
-        """
-        logger.info("Calculating target variable (favorite_covered)...")
-        
-        df['favorite_team'] = df.apply(
-            lambda row: row['home_team'] if row['spread_favorite'] == 'home' else row['away_team'],
-            axis=1
-        )
-        
-        df['underdog_team'] = df.apply(
-            lambda row: row['away_team'] if row['spread_favorite'] == 'home' else row['home_team'],
-            axis=1
-        )
-        
-        df['favorite_score'] = df.apply(
-            lambda row: row['home_score'] if row['spread_favorite'] == 'home' else row['away_score'],
-            axis=1
-        )
-        
-        df['underdog_score'] = df.apply(
-            lambda row: row['away_score'] if row['spread_favorite'] == 'home' else row['home_score'],
-            axis=1
-        )
-        
-        # Favorite covers if they win by MORE than the spread
-        df['favorite_margin'] = df['favorite_score'] - df['underdog_score']
-        df['favorite_covered'] = (df['favorite_margin'] > df['spread_line']).astype(int)
-        
-        logger.info(f"✓ Target calculated: {df['favorite_covered'].sum()} favorites covered, {len(df) - df['favorite_covered'].sum()} underdogs covered")
-        
-        return df
-    
-    def calculate_rolling_features(self, df):
-        """
-        Calculate rolling/historical features for each game
-        Uses only data BEFORE the current game (no data leakage)
-        """
-        logger.info("Calculating rolling features...")
-        
-        df = df.sort_values(['gameday', 'game_id']).reset_index(drop=True)
-        
-        features_list = []
-        
-        for idx, game in df.iterrows():
-            if idx % 50 == 0:
-                logger.info(f"  Processing game {idx}/{len(df)}")
-            
-            # Get historical games BEFORE this game
-            historical = df[df['gameday'] < game['gameday']].copy()
-            
-            features = self._calculate_game_features(
-                game,
-                historical,
-                game['favorite_team'],
-                game['underdog_team']
-            )
-            
-            features_list.append(features)
-        
-        features_df = pd.DataFrame(features_list)
-        logger.info(f"✓ Calculated {len(features_df.columns)} features")
-        
-        return features_df
-    
-    def _calculate_game_features(self, game, historical, fav_team, und_team):
-        """Calculate all features for a single game"""
-        
-        features = {
-            'game_id': game['game_id'],
-            'season': game['season'],
-            'week': game['week'],
-            'favorite_team': fav_team,
-            'underdog_team': und_team,
-            'spread_line': game['spread_line']
-        }
-        
-        # Feature 1: Recent Form (Last 5 games win rate)
-        fav_recent = self._get_recent_form(historical, fav_team, window=5)
-        und_recent = self._get_recent_form(historical, und_team, window=5)
-        features['fav_recent_form'] = fav_recent
-        features['und_recent_form'] = und_recent
-        features['recent_form_diff'] = fav_recent - und_recent
-        
-        # Feature 2: ATS Performance (Against the Spread)
-        fav_ats = self._get_ats_record(historical, fav_team)
-        und_ats = self._get_ats_record(historical, und_team)
-        features['fav_ats'] = fav_ats
-        features['und_ats'] = und_ats
-        features['ats_diff'] = fav_ats - und_ats
-        
-        # Feature 3: Home/Away Performance
-        is_fav_home = game['spread_favorite'] == 'home'
-        features['fav_is_home'] = 1 if is_fav_home else 0
-        features['fav_home_record'] = self._get_home_away_record(historical, fav_team, home=is_fav_home)
-        features['und_home_record'] = self._get_home_away_record(historical, und_team, home=not is_fav_home)
-        
-        # Feature 4: Head-to-Head
-        features['h2h_fav_wins'] = self._get_h2h_record(historical, fav_team, und_team)
-        
-        # Feature 5: Divisional Game
-        features['is_divisional'] = self._is_divisional_game(fav_team, und_team)
-        
-        # Feature 6: Spread Magnitude Category
-        spread = abs(game['spread_line'])
-        if spread <= 3:
-            features['spread_category'] = 0  # Very close
-        elif spread <= 7:
-            features['spread_category'] = 1  # Close
-        elif spread <= 10:
-            features['spread_category'] = 2  # Moderate
-        else:
-            features['spread_category'] = 3  # Large
-        
-        # Feature 7: Surface & Roof
-        features['surface_turf'] = 1 if game.get('surface') == 'turf' else 0
-        features['roof_dome'] = 1 if game.get('roof') == 'dome' else 0
-        
-        # Feature 8: Week number (early/mid/late season)
-        features['week_num'] = game['week']
-        features['is_late_season'] = 1 if game['week'] >= 14 else 0
-        
-        return features
-    
-    def _get_recent_form(self, historical, team, window=5):
-        """Calculate win rate in last N games"""
-        team_games = historical[
-            (historical['home_team'] == team) | (historical['away_team'] == team)
-        ].tail(window)
-        
-        if len(team_games) == 0:
-            return 0.5  # Default
-        
-        wins = 0
-        for _, game in team_games.iterrows():
-            if game['home_team'] == team:
-                wins += 1 if game['home_score'] > game['away_score'] else 0
-            else:
-                wins += 1 if game['away_score'] > game['home_score'] else 0
-        
-        return wins / len(team_games)
-    
-    def _get_ats_record(self, historical, team):
-        """Calculate ATS (Against the Spread) win rate"""
-        team_games = historical[
-            ((historical['favorite_team'] == team) | (historical['underdog_team'] == team)) &
-            (historical['spread_line'].notna())
-        ]
-        
-        if len(team_games) == 0:
-            return 0.5
-        
-        covers = team_games['favorite_covered'].sum() if team in team_games['favorite_team'].values else len(team_games) - team_games['favorite_covered'].sum()
-        return covers / len(team_games)
-    
-    def _get_home_away_record(self, historical, team, home=True):
-        """Get win rate as home or away team"""
-        if home:
-            team_games = historical[historical['home_team'] == team]
-            if len(team_games) == 0:
-                return 0.5
-            wins = (team_games['home_score'] > team_games['away_score']).sum()
-        else:
-            team_games = historical[historical['away_team'] == team]
-            if len(team_games) == 0:
-                return 0.5
-            wins = (team_games['away_score'] > team_games['home_score']).sum()
-        
-        return wins / len(team_games)
-    
-    def _get_h2h_record(self, historical, team1, team2):
-        """Get head-to-head win rate for team1"""
-        h2h_games = historical[
-            ((historical['home_team'] == team1) & (historical['away_team'] == team2)) |
-            ((historical['home_team'] == team2) & (historical['away_team'] == team1))
-        ]
-        
-        if len(h2h_games) == 0:
-            return 0.5
-        
-        wins = 0
-        for _, game in h2h_games.iterrows():
-            if game['home_team'] == team1:
-                wins += 1 if game['home_score'] > game['away_score'] else 0
-            else:
-                wins += 1 if game['away_score'] > game['home_score'] else 0
-        
-        return wins / len(h2h_games)
-    
-    def _is_divisional_game(self, team1, team2):
-        """Check if two teams are in the same division"""
-        divisions = {
-            'AFC_EAST': ['BUF', 'MIA', 'NE', 'NYJ'],
-            'AFC_NORTH': ['BAL', 'CIN', 'CLE', 'PIT'],
-            'AFC_SOUTH': ['HOU', 'IND', 'JAX', 'TEN'],
-            'AFC_WEST': ['DEN', 'KC', 'LV', 'LAC'],
-            'NFC_EAST': ['DAL', 'NYG', 'PHI', 'WAS'],
-            'NFC_NORTH': ['CHI', 'DET', 'GB', 'MIN'],
-            'NFC_SOUTH': ['ATL', 'CAR', 'NO', 'TB'],
-            'NFC_WEST': ['ARI', 'LAR', 'SF', 'SEA']
-        }
-        
-        for teams in divisions.values():
-            if team1 in teams and team2 in teams:
-                return 1
-        return 0
-    
-    def add_player_impact_features(self, features_df):
-        """
-        Add player impact features from Supabase (if available)
-        This requires running HistoricalGamesBatchProcessor first
-        """
-        logger.info("Checking for player impact data...")
-        
-        try:
-            conn = self.db.get_connection()
-            
-            # Check if player_impact table exists
-            query = """
-            SELECT game_id, home_impact, away_impact, net_advantage
-            FROM player_impact
-            """
-            
-            player_data = conn.run(query)
-            
-            if player_data:
-                player_df = pd.DataFrame(player_data, columns=['game_id', 'home_impact', 'away_impact', 'net_advantage'])
-                features_df = features_df.merge(player_df, on='game_id', how='left')
-                
-                # Fill missing with 0 (neutral impact)
-                features_df['home_impact'] = features_df['home_impact'].fillna(0)
-                features_df['away_impact'] = features_df['away_impact'].fillna(0)
-                features_df['net_advantage'] = features_df['net_advantage'].fillna(0)
-                
-                logger.info(f"✓ Added player impact features for {len(player_df)} games")
-            else:
-                logger.warning("No player impact data found - run HistoricalGamesBatchProcessor first")
-                features_df['home_impact'] = 0
-                features_df['away_impact'] = 0
-                features_df['net_advantage'] = 0
-        
-        except Exception as e:
-            logger.warning(f"Could not load player impact data: {e}")
-            features_df['home_impact'] = 0
-            features_df['away_impact'] = 0
-            features_df['net_advantage'] = 0
-        
-        return features_df
-    
-    def generate_training_data(self, output_file='training_data.csv'):
-        """Main method to generate complete training dataset"""
-        
-        logger.info("="*60)
-        logger.info("GENERATING TRAINING DATA FOR XGBOOST")
-        logger.info("="*60)
-        
-        # Step 1: Fetch games
-        games_df = self.fetch_games_with_features()
-        
-        if games_df.empty:
-            logger.error("No games found - cannot generate training data")
-            return None
-        
-        # Step 2: Calculate target
-        games_df = self.calculate_target(games_df)
-        
-        # Step 3: Calculate features
-        features_df = self.calculate_rolling_features(games_df)
-        
-        # Step 4: Add player impact (if available)
-        features_df = self.add_player_impact_features(features_df)
-        
-        # Step 5: Merge with target
-        final_df = features_df.merge(
-            games_df[['game_id', 'favorite_covered']], 
-            on='game_id', 
-            how='left'
-        )
-        
-        # Step 6: Save
-        final_df.to_csv(output_file, index=False)
-        logger.info(f"✓ Training data saved to {output_file}")
-        logger.info(f"  Shape: {final_df.shape}")
-        logger.info(f"  Target distribution: {final_df['favorite_covered'].value_counts().to_dict()}")
-        
-        # Show summary
-        logger.info("\nFeature Summary:")
-        logger.info(f"  Total features: {len(final_df.columns) - 1}")  # Exclude target
-        logger.info(f"  Total samples: {len(final_df)}")
-        logger.info(f"  Missing values: {final_df.isnull().sum().sum()}")
-        
-        return final_df
+def get_connection():
+    host = (os.environ.get('SUPABASE_DB_HOST') or os.environ.get('DB_HOST', '')).strip()
+    port = int((os.environ.get('SUPABASE_DB_PORT') or os.environ.get('DB_PORT', '6543')).strip())
+    database = (os.environ.get('SUPABASE_DB_NAME') or os.environ.get('DB_NAME', '')).strip()
+    user = (os.environ.get('SUPABASE_DB_USER') or os.environ.get('DB_USER', '')).strip()
+    password = (os.environ.get('SUPABASE_DB_PASSWORD') or os.environ.get('DB_PASSWORD', '')).strip()
+
+    conn = pg8000.connect(
+        host=host, port=port, database=database,
+        user=user, password=password, ssl_context=True
+    )
+    conn.autocommit = True
+    return conn
+
+
+# ---------------------------------------------------------------------------
+# 2. MASTER JOIN QUERY
+#    This is the big SQL that pulls everything together.
+#    Think of it like stacking Lego sets side by side:
+#      - Start with every game (the base plate)
+#      - Snap on player impact data for that game
+#      - Snap on season stats for the HOME team
+#      - Snap on season stats for the AWAY team
+#      - Snap on situational features for HOME team
+#      - Snap on situational features for AWAY team
+# ---------------------------------------------------------------------------
+
+MASTER_QUERY = """
+SELECT
+    g.game_id, g.season, g.week,
+    g.home_team, g.away_team,
+    g.home_score, g.away_score,
+    g.spread_line,
+    (g.home_score - g.away_score)                   AS actual_margin,
+    (g.home_score - g.away_score - g.spread_line)   AS ats_result,
+    g.div_game,
+
+    -- Player impact (per-game from PFFGameProcessor)
+    gm.home_avg_impact,
+    gm.away_avg_impact,
+    gm.avg_impact_differential,
+
+    -- Home team season rankings
+    home_tr.win_rate        AS home_win_rate,
+    home_tr.avg_points_scored   AS home_ppg,
+    home_tr.avg_points_allowed  AS home_papg,
+    home_tr.point_differential  AS home_pt_diff,
+    home_tr.offensive_rank      AS home_off_rank,
+    home_tr.defensive_rank      AS home_def_rank,
+    home_tr.overall_rank        AS home_overall_rank,
+    home_tr.ats_cover_rate      AS home_ats_rate,
+    home_tr.avg_spread_line     AS home_avg_spread,
+
+    -- Away team season rankings
+    away_tr.win_rate        AS away_win_rate,
+    away_tr.avg_points_scored   AS away_ppg,
+    away_tr.avg_points_allowed  AS away_papg,
+    away_tr.point_differential  AS away_pt_diff,
+    away_tr.offensive_rank      AS away_off_rank,
+    away_tr.defensive_rank      AS away_def_rank,
+    away_tr.overall_rank        AS away_overall_rank,
+    away_tr.ats_cover_rate      AS away_ats_rate,
+    away_tr.avg_spread_line     AS away_avg_spread,
+
+    -- Home team situational features
+    home_tf.home_win_rate       AS home_at_home_wr,
+    home_tf.away_win_rate       AS home_on_road_wr,
+    home_tf.home_advantage      AS home_home_adv,
+    home_tf.div_win_rate        AS home_div_wr,
+    home_tf.div_advantage       AS home_div_adv,
+    home_tf.prime_time_win_rate AS home_pt_wr,
+    home_tf.vs_strong_win_rate  AS home_vs_strong,
+    home_tf.vs_mid_win_rate     AS home_vs_mid,
+    home_tf.vs_weak_win_rate    AS home_vs_weak,
+    home_tf.close_game_ats_rate     AS home_close_ats,
+    home_tf.after_loss_ats_rate     AS home_after_loss_ats,
+    home_tf.after_bye_ats_rate      AS home_after_bye_ats,
+
+    -- Away team situational features
+    away_tf.home_win_rate       AS away_at_home_wr,
+    away_tf.away_win_rate       AS away_on_road_wr,
+    away_tf.home_advantage      AS away_home_adv,
+    away_tf.div_win_rate        AS away_div_wr,
+    away_tf.div_advantage       AS away_div_adv,
+    away_tf.prime_time_win_rate AS away_pt_wr,
+    away_tf.vs_strong_win_rate  AS away_vs_strong,
+    away_tf.vs_mid_win_rate     AS away_vs_mid,
+    away_tf.vs_weak_win_rate    AS away_vs_weak,
+    away_tf.close_game_ats_rate     AS away_close_ats,
+    away_tf.after_loss_ats_rate     AS away_after_loss_ats,
+    away_tf.after_bye_ats_rate      AS away_after_bye_ats
+
+FROM games g
+JOIN game_id_mapping gm
+    ON g.game_id = gm.game_id
+-- Use PREVIOUS season's team data to prevent leakage.
+-- A 2024 game joins to 2023 team stats (what's actually known at game time).
+JOIN team_rankings home_tr
+    ON g.home_team = home_tr.team_id AND g.season - 1 = home_tr.season
+JOIN team_rankings away_tr
+    ON g.away_team = away_tr.team_id AND g.season - 1 = away_tr.season
+JOIN team_season_features home_tf
+    ON g.home_team = home_tf.team_id AND g.season - 1 = home_tf.season
+JOIN team_season_features away_tf
+    ON g.away_team = away_tf.team_id AND g.season - 1 = away_tf.season
+WHERE g.game_type = 'REG'
+    AND g.home_score IS NOT NULL
+    AND gm.home_avg_impact IS NOT NULL
+ORDER BY g.season, g.week
+"""
+
+
+# ---------------------------------------------------------------------------
+# 3. FETCH + BUILD DATAFRAME
+#    Run the query, get rows back, turn them into a pandas DataFrame.
+#    A DataFrame is basically an Excel spreadsheet in Python.
+# ---------------------------------------------------------------------------
+
+def fetch_raw_data():
+    logger.info("Connecting to Supabase...")
+    conn = get_connection()
+
+    logger.info("Running master join query...")
+    cursor = conn.cursor()
+    cursor.execute(MASTER_QUERY)
+    rows = cursor.fetchall()
+    col_names = [desc[0] for desc in cursor.description]
+    cursor.close()
+    conn.close()
+
+    df = pd.DataFrame(rows, columns=col_names)
+    logger.info(f"Fetched {len(df)} games with all features joined")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 4. FEATURE ENGINEERING
+#    The raw columns are good, but XGBoost does better with DIFFERENTIALS.
+#    Instead of feeding "home team scores 25 ppg" and "away team scores 20 ppg"
+#    separately, we also tell it "home team scores 5 MORE ppg than away."
+#    That gap is what actually predicts outcomes.
+# ---------------------------------------------------------------------------
+
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    # -- Differentials (home minus away) --
+    df['ppg_diff']      = df['home_ppg'] - df['away_ppg']
+    df['papg_diff']     = df['home_papg'] - df['away_papg']
+    df['pt_diff_diff']  = df['home_pt_diff'] - df['away_pt_diff']
+    df['win_rate_diff']  = df['home_win_rate'] - df['away_win_rate']
+
+    # Rank diffs (lower rank = better, so away - home = positive when home is better)
+    df['off_rank_diff']     = df['away_off_rank'] - df['home_off_rank']
+    df['def_rank_diff']     = df['away_def_rank'] - df['home_def_rank']
+    df['overall_rank_diff'] = df['away_overall_rank'] - df['home_overall_rank']
+
+    df['ats_rate_diff']     = df['home_ats_rate'] - df['away_ats_rate']
+    df['vs_strong_diff']    = df['home_vs_strong'] - df['away_vs_strong']
+    df['vs_weak_diff']      = df['home_vs_weak'] - df['away_vs_weak']
+    df['pt_wr_diff']        = df['home_pt_wr'] - df['away_pt_wr']
+    df['close_ats_diff']    = df['home_close_ats'] - df['away_close_ats']
+
+    # -- Convert booleans --
+    df['div_game'] = df['div_game'].fillna(False).astype(int)
+
+    # -- Fill any remaining NULLs with neutral values --
+    df = df.fillna(0)
+
+    logger.info(f"Engineered features. Total columns: {len(df.columns)}")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 5. SAVE TO CSV
+#    The CSV is the handoff: generate_training_data creates it,
+#    train_model.py reads it. Keeps the two scripts independent.
+# ---------------------------------------------------------------------------
+
+def main():
+    logger.info("=" * 60)
+    logger.info("GENERATING TRAINING DATA")
+    logger.info("=" * 60)
+
+    df = fetch_raw_data()
+    df = engineer_features(df)
+
+    output_path = os.path.join(os.path.dirname(__file__), 'training_data.csv')
+    df.to_csv(output_path, index=False)
+
+    logger.info(f"Saved to {output_path}")
+    logger.info(f"  Rows:    {len(df)}")
+    logger.info(f"  Columns: {len(df.columns)}")
+    logger.info(f"  Seasons: {sorted(df['season'].unique())}")
+    logger.info(f"  Nulls:   {df.isnull().sum().sum()}")
+
+    print(f"\nDone! {len(df)} rows saved to training_data.csv")
+    print("Next step: python train_model.py")
 
 
 if __name__ == "__main__":
-    generator = TrainingDataGenerator()
-    df = generator.generate_training_data(output_file='training_data.csv')
-    
-    if df is not None:
-        print("\n" + "="*60)
-        print("✓ TRAINING DATA READY FOR XGBOOST!")
-        print("="*60)
-        print(f"\nNext step: Run train_xgboost_model.py")
-
+    main()

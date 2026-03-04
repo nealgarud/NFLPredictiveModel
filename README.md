@@ -1,30 +1,64 @@
 # NFL Predictive Model
 
-Machine Learning-powered NFL spread prediction system with player impact analysis.
+Machine Learning-powered NFL spread prediction system with player impact analysis and AI chatbot.
 
 ## Architecture
 
-This project consists of 3 AWS Lambda functions:
+```
+User
+  │
+  ▼
+API Gateway
+  ├── POST /predict  ──►  XGBoostPredictionLambda  ──►  S3 (model)
+  │                                │                ──►  Supabase (features)
+  │
+  └── POST /chat    ──►  BedrockChatLambda  ──►  Amazon Bedrock (Claude 3 Haiku)
+                                   │         ──►  XGBoostPredictionLambda
+```
 
-### 1. **playerimpact/** - Player Impact Calculator
-- Calculates player impact using Madden ratings and Sportradar API
-- Loads data from S3 (Madden CSVs)
-- Returns team impact scores and differentials
+---
 
-### 2. **predictivedatamodel/** - XGBoost Spread Predictor
-- ML-based spread prediction using XGBoost
-- Replaces manual weight calculations
-- Returns probability that favorite covers spread
+## Lambda Functions
 
-### 3. **chatbotAPI/** - Chatbot Interface
-- User-facing API
-- Orchestrates calls to playerimpact and predictivedatamodel
-- Can be connected to API Gateway
+### 1. `XGBoostPredictionLambda/` — ML Spread Predictor
+- Deployed as a **Docker container image** (ECR) — required because xgboost has native Linux binaries
+- Loads trained model + feature list from S3 on cold start
+- Queries Supabase for team rankings, situational features, and player impact averages
+- Builds 61-feature vector and runs XGBoost inference
+- Returns predicted margin, ATS pick, and confidence
 
-### 4. **ML-Training/** - Training Scripts (Local Only)
-- Not deployed as Lambda
-- Run locally or on EC2 to train XGBoost model
-- Outputs models that are deployed to predictivedatamodel/
+**Input:**
+```json
+{
+  "home_team": "BAL",
+  "away_team": "BUF",
+  "spread_line": -2.5,
+  "div_game": false,
+  "season": 2025
+}
+```
+
+### 2. `BedrockChatLambda/` — AI Chatbot
+- Deployed as a **standard zip** (only uses boto3, already in Lambda runtime)
+- Accepts natural language questions ("Who covers GB @ PIT -2.5?")
+- Uses Claude 3 Haiku (Amazon Bedrock) with tool use to extract game params
+- Invokes XGBoostPredictionLambda for the ML prediction
+- Returns a natural language betting analysis
+
+**Input:**
+```json
+{
+  "message": "Who covers GB @ PIT with Packers -2.5?"
+}
+```
+
+### 3. `playerimpact/` — Player Impact Calculator
+- Calculates per-game player impact using Madden ratings + Sportradar API
+- Feeds into `game_id_mapping` table, which XGBoostPredictionLambda uses for impact features
+
+### 4. `chatbotAPI/` — Legacy Chatbot Interface
+- Simple Lambda invoker (pre-Bedrock chatbot)
+- Superseded by BedrockChatLambda
 
 ---
 
@@ -33,132 +67,142 @@ This project consists of 3 AWS Lambda functions:
 ```
 NFLPredictiveModel/
 │
-├── playerimpact/                  # Lambda 1
+├── XGBoostPredictionLambda/       # ML inference Lambda (Docker/ECR)
 │   ├── lambda_function.py
 │   ├── requirements.txt
-│   └── ... (modules)
+│   └── Dockerfile
 │
-├── predictivedatamodel/           # Lambda 2
-│   ├── lambda_function.py
-│   ├── requirements.txt
-│   └── models/                   # XGBoost model files (copy from ML-Training)
-│
-├── chatbotAPI/                    # Lambda 3
+├── BedrockChatLambda/             # AI chatbot Lambda (zip)
 │   ├── lambda_function.py
 │   └── requirements.txt
 │
-├── ML-Training/                   # Local training (not a Lambda)
-│   ├── generate_training_data.py
-│   ├── train_xgboost_model.py
-│   └── models/                   # Train here, copy to predictivedatamodel/
+├── ML-Training/                   # Local training (not deployed)
+│   ├── generate_training_data.py  # Pull from Supabase → CSV
+│   ├── train_model.py             # Train XGBoost → models/
+│   └── models/
+│       ├── nfl_spread_model_latest.json
+│       └── feature_names.json
 │
-└── PredictiveDataModel/          # Legacy (to be cleaned up)
-    └── ... (old structure)
+├── playerimpact/                  # Player impact Lambda
+├── chatbotAPI/                    # Legacy chatbot Lambda
+├── PredictiveDataModel/           # Data pipeline Lambda (S3 → Supabase)
+│
+└── deploy.ps1                     # One-shot deployment script
 ```
 
 ---
 
-## Quick Start
+## Deployment
 
-### Deploy Lambdas
+### Prerequisites
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
+- AWS CLI configured (`aws configure`)
+- Model trained (`ML-Training/models/nfl_spread_model_latest.json` exists)
 
-Each Lambda folder contains:
-- `lambda_function.py` - Handler (entry point)
-- `requirements.txt` - Dependencies
-- Supporting modules
+### Option A: One-shot script
+1. Edit `deploy.ps1` — set `$AWS_ACCOUNT_ID` and `$AWS_REGION` at the top
+2. Run from the `NFLPredictiveModel/` folder:
+   ```powershell
+   .\deploy.ps1
+   ```
+   This will: upload model to S3 → create ECR repo → build + push Docker image → update both Lambdas.
 
-**Deploy process:**
-1. Install dependencies: `pip install -r requirements.txt -t .`
-2. Create ZIP: `zip -r lambda.zip .`
-3. Upload to AWS Lambda
+### Option B: Manual steps
 
-See individual Lambda README files for details.
+**Upload model to S3**
+```powershell
+aws s3 cp ML-Training/models/nfl_spread_model_latest.json s3://nfl-predictive-model-artifacts/models/nfl_spread_model_latest.json
+aws s3 cp ML-Training/models/feature_names.json s3://nfl-predictive-model-artifacts/models/feature_names.json
+```
 
-### Train ML Model
+**Build and push Docker image (XGBoostPredictionLambda)**
+```powershell
+# Authenticate Docker with ECR
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
 
-```bash
-cd ML-Training
-pip install -r requirements.txt
+# Create ECR repo (first time only)
+aws ecr create-repository --repository-name xgboost-prediction-lambda --region us-east-1
 
-# Set environment variables for Supabase
-export SUPABASE_DB_HOST=...
-export SUPABASE_DB_PASSWORD=...
+# Build
+docker build -t <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/xgboost-prediction-lambda:latest XGBoostPredictionLambda/
 
-# Generate training data
-python generate_training_data.py
+# Push
+docker push <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/xgboost-prediction-lambda:latest
 
-# Train model
-python train_xgboost_model.py
+# Update Lambda
+aws lambda update-function-code \
+  --function-name XGBoostPredictionLambda \
+  --image-uri <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/xgboost-prediction-lambda:latest
+```
 
-# Copy trained model to Lambda
-cp -r models/ ../predictivedatamodel/
+**Deploy BedrockChatLambda (zip)**
+```powershell
+Compress-Archive -Force -Path BedrockChatLambda/lambda_function.py -DestinationPath BedrockChatLambda/deployment.zip
+aws lambda update-function-code --function-name BedrockChatLambda --zip-file fileb://BedrockChatLambda/deployment.zip
 ```
 
 ---
 
 ## Environment Variables
 
-### playerimpact
-```
-SPORTRADAR_API_KEY=your_api_key
-PLAYER_DATA_BUCKET=sportsdatacollection
+### XGBoostPredictionLambda
+| Variable | Value |
+|---|---|
+| `S3_BUCKET` | `nfl-predictive-model-artifacts` |
+| `SUPABASE_DB_HOST` | `db.xxx.supabase.co` |
+| `SUPABASE_DB_PASSWORD` | your password |
+| `SUPABASE_DB_NAME` | `postgres` |
+| `SUPABASE_DB_USER` | `postgres` |
+| `SUPABASE_DB_PORT` | `6543` |
+
+### BedrockChatLambda
+| Variable | Value |
+|---|---|
+| `XGBOOST_LAMBDA_NAME` | `XGBoostPredictionLambda` |
+| `BEDROCK_MODEL_ID` | `anthropic.claude-3-haiku-20240307-v1:0` |
+
+---
+
+## IAM Permissions
+
+### XGBoostPredictionLambda execution role needs:
+- `s3:GetObject` on `arn:aws:s3:::nfl-predictive-model-artifacts/*`
+
+### BedrockChatLambda execution role needs:
+- `bedrock:InvokeModel` on `arn:aws:bedrock:*::foundation-model/anthropic.claude-3-haiku-*`
+- `lambda:InvokeFunction` on the XGBoostPredictionLambda ARN
+
+---
+
+## Amazon Bedrock Setup
+
+1. AWS Console → **Amazon Bedrock** → **Model access** (left sidebar)
+2. Click **Manage model access**
+3. Find **Anthropic** → check **Claude 3 Haiku**
+4. Click **Save changes**
+5. Wait for status: **Access granted** (usually instant)
+
+---
+
+## Training the Model
+
+```powershell
+cd ML-Training
+
+# Set Supabase credentials
+cp .env.example .env   # fill in your values
+
+# Pull data from Supabase into CSV
+python generate_training_data.py
+
+# Train XGBoost (saves to models/)
+python train_model.py
 ```
 
-### predictivedatamodel
-```
-SUPABASE_DB_HOST=db.xxx.supabase.co
-SUPABASE_DB_PASSWORD=your_password
-SUPABASE_DB_NAME=postgres
-SUPABASE_DB_USER=postgres
-SUPABASE_DB_PORT=5432
-```
-
-### chatbotAPI
-```
-(None required - invokes other Lambdas via boto3)
-```
+Then re-run `deploy.ps1` to push the new model to S3 and redeploy.
 
 ---
 
 ## Documentation
-
-- [Lambda Architecture](LAMBDA_ARCHITECTURE.md) - Detailed architecture
-- `playerimpact/README.md` - Player Impact Lambda docs
-- `predictivedatamodel/README.md` - Prediction Lambda docs
-- `chatbotAPI/README.md` - Chatbot API docs
-- `ML-Training/README.md` - Training workflow
-
----
-
-## Testing Locally
-
-Each Lambda has a `__main__` block for local testing:
-
-```bash
-# Test playerimpact
-cd playerimpact
-python lambda_function.py
-
-# Test predictivedatamodel (requires trained model)
-cd predictivedatamodel
-python lambda_function.py
-
-# Test chatbotAPI (requires other Lambdas deployed)
-cd chatbotAPI
-python lambda_function.py
-```
-
----
-
-## Next Steps
-
-1. ✅ Train ML model (see ML-Training/README.md)
-2. ✅ Deploy Lambdas to AWS
-3. ✅ Set environment variables
-4. ✅ Test with API Gateway or Lambda console
-5. ✅ Clean up legacy PredictiveDataModel/ folder
-
----
-
-**Questions?** Check individual Lambda README files or LAMBDA_ARCHITECTURE.md
-
+- [Lambda Architecture](LAMBDA_ARCHITECTURE.md) — detailed architecture
+- [ML Training README](ML-Training/README.md) — training workflow
