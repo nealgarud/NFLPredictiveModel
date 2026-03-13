@@ -263,12 +263,16 @@ def insert_mappings(mappings):
     db = DatabaseUtils()
 
     try: 
-        # UPSERT Query
+        # UPSERT Query — skips rows where the sportradar_id is already owned
+        # by a different game_id (handles JAC/JAX duplicate legacy data).
         query = """
             INSERT INTO game_id_mapping
                 (game_id, sportradar_id, season, week, home_team, away_team, game_date)
-            VALUES
-                (%s, %s, %s, %s, %s, %s, %s)
+            SELECT %s, %s, %s, %s, %s, %s, %s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM game_id_mapping
+                WHERE sportradar_id = %s
+            )
             ON CONFLICT(game_id)
             DO UPDATE SET 
                 sportradar_id = EXCLUDED.sportradar_id,
@@ -280,7 +284,7 @@ def insert_mappings(mappings):
                 updated_at = NOW()
         """
         
-        # Prepare batch data
+        # Prepare batch data — sportradar_id repeated for the WHERE NOT EXISTS check
         batch_data = [
             (
                 m['game_id'],
@@ -289,7 +293,8 @@ def insert_mappings(mappings):
                 m['week'],
                 m['home_team'],
                 m['away_team'],
-                m['game_date']
+                m['game_date'],
+                m['sportradar_id'],  # for WHERE NOT EXISTS subquery
             )
             for m in mappings
         ]

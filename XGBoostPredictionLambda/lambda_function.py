@@ -153,6 +153,167 @@ def _fetch_team_season_features(db, team_id: str, season: int) -> dict:
     return dict(zip(cols, row))
 
 
+def _fetch_pff_profile(db, team_id: str, season: int) -> dict:
+    """Pull previous-season team_pff_profiles row for a team."""
+    query = """
+        SELECT def_grade, pass_rush_grade, run_def_grade, coverage_grade,
+               qb_grade, rb_grade, ol_pass_block, ol_run_block, off_run_pass_ratio
+        FROM team_pff_profiles
+        WHERE team_name = %s AND season = %s
+        LIMIT 1
+    """
+    cur = db.cursor()
+    cur.execute(query, (team_id, season - 1))
+    row = cur.fetchone()
+    cur.close()
+
+    cols = [
+        "def_grade", "pass_rush_grade", "run_def_grade", "coverage_grade",
+        "qb_grade", "rb_grade", "ol_pass_block", "ol_run_block", "off_run_pass_ratio",
+    ]
+    if row is None:
+        logger.warning(f"No team_pff_profiles for {team_id} season {season - 1}; using zeros")
+        return {k: 0.0 for k in cols}
+
+    return dict(zip(cols, [float(v) if v is not None else 0.0 for v in row]))
+
+
+def _fetch_pff_team_matchup(db, home_team: str, away_team: str, season: int) -> dict:
+    """
+    Load all 32 teams' PFF grades for season-1, compute per-season 1-32 rankings,
+    then return all 38 matchup features for the home vs away pairing.
+    Falls back gracefully to zeros if no data exists for that season.
+    """
+    query = """
+        SELECT
+            o.team, o.overall_grade, o.offense_grade, o.passing_grade,
+            o.pass_block_grade, o.run_grade,
+            d.defense_grade, d.run_defense_grade, d.coverage_grade, d.pass_rush_grade,
+            st.special_teams_grade
+        FROM pff_team_offense o
+        JOIN pff_team_defense d USING (team, season)
+        JOIN pff_team_special_teams st USING (team, season)
+        WHERE o.season = %s
+    """
+    cur = db.cursor()
+    cur.execute(query, (season,))
+    rows = cur.fetchall()
+    cur.close()
+
+    _zero = {
+        'home_pff_offense': 0.0, 'away_pff_offense': 0.0,
+        'home_pff_defense': 0.0, 'away_pff_defense': 0.0,
+        'home_pff_run': 0.0, 'away_pff_run': 0.0,
+        'home_pff_passing': 0.0, 'away_pff_passing': 0.0,
+        'home_pff_run_defense': 0.0, 'away_pff_run_defense': 0.0,
+        'home_pff_coverage': 0.0, 'away_pff_coverage': 0.0,
+        'home_pff_pass_rush': 0.0, 'away_pff_pass_rush': 0.0,
+        'home_pff_special_teams': 0.0, 'away_pff_special_teams': 0.0,
+        'home_run_offense_rank': 16, 'away_run_offense_rank': 16,
+        'home_pass_offense_rank': 16, 'away_pass_offense_rank': 16,
+        'home_run_defense_rank': 16, 'away_run_defense_rank': 16,
+        'home_pass_defense_rank': 16, 'away_pass_defense_rank': 16,
+        'home_pass_rush_rank': 16, 'away_pass_rush_rank': 16,
+        'home_special_teams_rank': 16, 'away_special_teams_rank': 16,
+        'matchup_run_off_vs_run_def': 0.0, 'matchup_pass_off_vs_coverage': 0.0,
+        'matchup_pass_rush_vs_pass_block': 0.0, 'matchup_overall_off_vs_def': 0.0,
+        'matchup_special_teams': 0.0, 'pff_overall_diff': 0.0,
+        'rank_adv_run_game': 0, 'rank_adv_pass_game': 0,
+        'rank_adv_rush_pressure': 0, 'rank_adv_special_teams': 0,
+        'pff_offense_diff': 0.0, 'pff_defense_diff': 0.0,
+    }
+
+    if not rows:
+        logger.warning(f"No PFF team grades for season {prev}; using zeros")
+        return _zero
+
+    cols = [
+        'team', 'overall_grade', 'offense_grade', 'passing_grade',
+        'pass_block_grade', 'run_grade',
+        'defense_grade', 'run_defense_grade', 'coverage_grade', 'pass_rush_grade',
+        'special_teams_grade',
+    ]
+    # Build team lookup dict
+    grades: dict[str, dict] = {}
+    for row in rows:
+        d = dict(zip(cols, row))
+        grades[d['team'].upper()] = {k: float(v) if v is not None else 0.0
+                                     for k, v in d.items() if k != 'team'}
+
+    # Compute 1-32 ranks (rank 1 = highest grade = best)
+    rank_specs = [
+        ('run_grade',           'run_offense_rank'),
+        ('passing_grade',       'pass_offense_rank'),
+        ('run_defense_grade',   'run_defense_rank'),
+        ('coverage_grade',      'pass_defense_rank'),
+        ('pass_rush_grade',     'pass_rush_rank'),
+        ('special_teams_grade', 'special_teams_rank'),
+    ]
+    for grade_col, rank_col in rank_specs:
+        sorted_teams = sorted(grades.keys(),
+                              key=lambda t: grades[t].get(grade_col, 0.0),
+                              reverse=True)
+        for rank, team in enumerate(sorted_teams, start=1):
+            grades[team][rank_col] = rank
+
+    # Normalize abbreviations to match PFF storage (e.g. JAC→JAX, LA→LAR)
+    _GAMES_TO_PFF = {'JAC': 'JAX', 'LA': 'LAR'}
+    home_pff_key = _GAMES_TO_PFF.get(home_team, home_team)
+    away_pff_key = _GAMES_TO_PFF.get(away_team, away_team)
+    hg = grades.get(home_pff_key, {})
+    ag = grades.get(away_pff_key, {})
+
+    def _g(d, k): return d.get(k, 0.0)
+    def _r(d, k): return int(d.get(k, 16))
+
+    h_off  = _g(hg, 'offense_grade');   a_off  = _g(ag, 'offense_grade')
+    h_def  = _g(hg, 'defense_grade');   a_def  = _g(ag, 'defense_grade')
+    h_run  = _g(hg, 'run_grade');       a_run  = _g(ag, 'run_grade')
+    h_pass = _g(hg, 'passing_grade');   a_pass = _g(ag, 'passing_grade')
+    h_rdef = _g(hg, 'run_defense_grade'); a_rdef = _g(ag, 'run_defense_grade')
+    h_cov  = _g(hg, 'coverage_grade');  a_cov  = _g(ag, 'coverage_grade')
+    h_pr   = _g(hg, 'pass_rush_grade'); a_pr   = _g(ag, 'pass_rush_grade')
+    h_pb   = _g(hg, 'pass_block_grade'); a_pb  = _g(ag, 'pass_block_grade')
+    h_st   = _g(hg, 'special_teams_grade'); a_st = _g(ag, 'special_teams_grade')
+    h_ovr  = _g(hg, 'overall_grade');   a_ovr  = _g(ag, 'overall_grade')
+
+    h_ror = _r(hg, 'run_offense_rank');  a_ror = _r(ag, 'run_offense_rank')
+    h_por = _r(hg, 'pass_offense_rank'); a_por = _r(ag, 'pass_offense_rank')
+    h_rdr = _r(hg, 'run_defense_rank');  a_rdr = _r(ag, 'run_defense_rank')
+    h_pdr = _r(hg, 'pass_defense_rank'); a_pdr = _r(ag, 'pass_defense_rank')
+    h_prr = _r(hg, 'pass_rush_rank');   a_prr = _r(ag, 'pass_rush_rank')
+    h_str = _r(hg, 'special_teams_rank'); a_str = _r(ag, 'special_teams_rank')
+
+    return {
+        'home_pff_offense': h_off, 'away_pff_offense': a_off,
+        'home_pff_defense': h_def, 'away_pff_defense': a_def,
+        'home_pff_run': h_run,     'away_pff_run': a_run,
+        'home_pff_passing': h_pass, 'away_pff_passing': a_pass,
+        'home_pff_run_defense': h_rdef, 'away_pff_run_defense': a_rdef,
+        'home_pff_coverage': h_cov, 'away_pff_coverage': a_cov,
+        'home_pff_pass_rush': h_pr, 'away_pff_pass_rush': a_pr,
+        'home_pff_special_teams': h_st, 'away_pff_special_teams': a_st,
+        'home_run_offense_rank': h_ror,  'away_run_offense_rank': a_ror,
+        'home_pass_offense_rank': h_por, 'away_pass_offense_rank': a_por,
+        'home_run_defense_rank': h_rdr,  'away_run_defense_rank': a_rdr,
+        'home_pass_defense_rank': h_pdr, 'away_pass_defense_rank': a_pdr,
+        'home_pass_rush_rank': h_prr,    'away_pass_rush_rank': a_prr,
+        'home_special_teams_rank': h_str, 'away_special_teams_rank': a_str,
+        'matchup_run_off_vs_run_def':      (h_run - a_rdef) - (a_run - h_rdef),
+        'matchup_pass_off_vs_coverage':    (h_pass - a_cov) - (a_pass - h_cov),
+        'matchup_pass_rush_vs_pass_block': (h_pr - a_pb) - (a_pr - h_pb),
+        'matchup_overall_off_vs_def':      (h_off - a_def) - (a_off - h_def),
+        'matchup_special_teams':           h_st - a_st,
+        'pff_overall_diff':                h_ovr - a_ovr,
+        'rank_adv_run_game':       a_rdr - h_ror,
+        'rank_adv_pass_game':      a_pdr - h_por,
+        'rank_adv_rush_pressure':  a_por - h_prr,
+        'rank_adv_special_teams':  a_str - h_str,
+        'pff_offense_diff':        h_off - a_off,
+        'pff_defense_diff':        h_def - a_def,
+    }
+
+
 def _fetch_player_impact(db, home_team: str, away_team: str, season: int) -> dict:
     """
     Average player impact scores per team for the season from game_id_mapping.
@@ -194,11 +355,19 @@ def _build_feature_vector(
     spread_line: float,
     div_game: int,
     feature_names: list[str],
+    home_pff: dict | None = None,
+    away_pff: dict | None = None,
+    pff_matchup: dict | None = None,
 ) -> np.ndarray:
     """
     Assemble every feature in the exact column order from feature_names.json.
     Mirrors the logic in generate_training_data.py / engineer_features().
+    home_pff / away_pff are optional; missing keys default to 0.
     """
+    home_pff = home_pff or {}
+    away_pff = away_pff or {}
+    pff_matchup = pff_matchup or {}
+
     raw = {
         # Game-level
         "spread_line": spread_line,
@@ -259,6 +428,27 @@ def _build_feature_vector(
         "away_after_loss_ats": away_tf["after_loss_ats_rate"],
         "away_after_bye_ats": away_tf["after_bye_ats_rate"],
 
+        # PFF grades — raw per team
+        "home_def_grade":       home_pff.get("def_grade", 0.0),
+        "home_pass_rush_grade": home_pff.get("pass_rush_grade", 0.0),
+        "home_run_def_grade":   home_pff.get("run_def_grade", 0.0),
+        "home_coverage_grade":  home_pff.get("coverage_grade", 0.0),
+        "home_qb_grade":        home_pff.get("qb_grade", 0.0),
+        "home_rb_grade":        home_pff.get("rb_grade", 0.0),
+        "home_ol_pass_block":   home_pff.get("ol_pass_block", 0.0),
+        "home_ol_run_block":    home_pff.get("ol_run_block", 0.0),
+        "home_run_pass_ratio":  home_pff.get("off_run_pass_ratio", 0.0),
+
+        "away_def_grade":       away_pff.get("def_grade", 0.0),
+        "away_pass_rush_grade": away_pff.get("pass_rush_grade", 0.0),
+        "away_run_def_grade":   away_pff.get("run_def_grade", 0.0),
+        "away_coverage_grade":  away_pff.get("coverage_grade", 0.0),
+        "away_qb_grade":        away_pff.get("qb_grade", 0.0),
+        "away_rb_grade":        away_pff.get("rb_grade", 0.0),
+        "away_ol_pass_block":   away_pff.get("ol_pass_block", 0.0),
+        "away_ol_run_block":    away_pff.get("ol_run_block", 0.0),
+        "away_run_pass_ratio":  away_pff.get("off_run_pass_ratio", 0.0),
+
         # Engineered differentials (mirrors generate_training_data.engineer_features)
         "ppg_diff": home_tr["avg_points_scored"] - away_tr["avg_points_scored"],
         "papg_diff": home_tr["avg_points_allowed"] - away_tr["avg_points_allowed"],
@@ -272,6 +462,46 @@ def _build_feature_vector(
         "vs_weak_diff": home_tf["vs_weak_win_rate"] - away_tf["vs_weak_win_rate"],
         "pt_wr_diff": home_tf["prime_time_win_rate"] - away_tf["prime_time_win_rate"],
         "close_ats_diff": home_tf["close_game_ats_rate"] - away_tf["close_game_ats_rate"],
+
+        # PFF differentials
+        "def_grade_diff":     home_pff.get("def_grade", 0.0)       - away_pff.get("def_grade", 0.0),
+        "pass_rush_diff":     home_pff.get("pass_rush_grade", 0.0) - away_pff.get("pass_rush_grade", 0.0),
+        "run_def_diff":       home_pff.get("run_def_grade", 0.0)   - away_pff.get("run_def_grade", 0.0),
+        "coverage_diff":      home_pff.get("coverage_grade", 0.0)  - away_pff.get("coverage_grade", 0.0),
+        "qb_grade_diff":      home_pff.get("qb_grade", 0.0)        - away_pff.get("qb_grade", 0.0),
+        "rb_grade_diff":      home_pff.get("rb_grade", 0.0)        - away_pff.get("rb_grade", 0.0),
+        "ol_pass_block_diff": home_pff.get("ol_pass_block", 0.0)   - away_pff.get("ol_pass_block", 0.0),
+        "ol_run_block_diff":  home_pff.get("ol_run_block", 0.0)    - away_pff.get("ol_run_block", 0.0),
+
+        # Matchup interactions (player-aggregated, Enhancement 1)
+        "matchup_away_pass_vs_home_cov": away_pff.get("qb_grade", 0.0)        - home_pff.get("coverage_grade", 0.0),
+        "matchup_away_run_vs_home_rdef": away_pff.get("rb_grade", 0.0)        - home_pff.get("run_def_grade", 0.0),
+        "matchup_home_pass_vs_away_cov": home_pff.get("qb_grade", 0.0)        - away_pff.get("coverage_grade", 0.0),
+        "matchup_home_run_vs_away_rdef": home_pff.get("rb_grade", 0.0)        - away_pff.get("run_def_grade", 0.0),
+
+        # Team-level PFF matchup features (Enhancement 2 — from pff_team_grades)
+        **{k: pff_matchup.get(k, 0.0) for k in [
+            'home_pff_offense', 'away_pff_offense',
+            'home_pff_defense', 'away_pff_defense',
+            'home_pff_run', 'away_pff_run',
+            'home_pff_passing', 'away_pff_passing',
+            'home_pff_run_defense', 'away_pff_run_defense',
+            'home_pff_coverage', 'away_pff_coverage',
+            'home_pff_pass_rush', 'away_pff_pass_rush',
+            'home_pff_special_teams', 'away_pff_special_teams',
+            'home_run_offense_rank', 'away_run_offense_rank',
+            'home_pass_offense_rank', 'away_pass_offense_rank',
+            'home_run_defense_rank', 'away_run_defense_rank',
+            'home_pass_defense_rank', 'away_pass_defense_rank',
+            'home_pass_rush_rank', 'away_pass_rush_rank',
+            'home_special_teams_rank', 'away_special_teams_rank',
+            'matchup_run_off_vs_run_def', 'matchup_pass_off_vs_coverage',
+            'matchup_pass_rush_vs_pass_block', 'matchup_overall_off_vs_def',
+            'matchup_special_teams', 'pff_overall_diff',
+            'rank_adv_run_game', 'rank_adv_pass_game',
+            'rank_adv_rush_pressure', 'rank_adv_special_teams',
+            'pff_offense_diff', 'pff_defense_diff',
+        ]},
     }
 
     # Build array in strict feature_names order, defaulting unknown keys to 0
@@ -331,11 +561,16 @@ def lambda_handler(event, context):
         home_tf = _fetch_team_season_features(db, home_team, season)
         away_tf = _fetch_team_season_features(db, away_team, season)
         impact = _fetch_player_impact(db, home_team, away_team, season)
+        home_pff = _fetch_pff_profile(db, home_team, season)
+        away_pff = _fetch_pff_profile(db, away_team, season)
+        pff_matchup = _fetch_pff_team_matchup(db, home_team, away_team, season)
 
         # Build feature vector
         vector = _build_feature_vector(
             home_tr, away_tr, home_tf, away_tf,
             impact, spread_line, div_game, _feature_names,
+            home_pff=home_pff, away_pff=away_pff,
+            pff_matchup=pff_matchup,
         )
 
         # Predict
