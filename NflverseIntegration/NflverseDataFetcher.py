@@ -5,6 +5,7 @@ Pulls per-game advanced metrics from nflverse (via nflreadpy), transforms them,
 and upserts into Supabase tables:
   - nflverse_qb_stats
   - nflverse_rb_stats
+  - nflverse_wr_stats
 
 Connection uses pg8000 (same pattern as playerimpact Lambda).
 
@@ -319,6 +320,149 @@ def get_rb_rolling_baseline(
             SUM(receiving_fumbles_lost) AS receiving_fumbles_lost
         FROM (
             SELECT * FROM nflverse_rb_stats
+            WHERE player_name = %s AND season = %s AND week < %s
+            ORDER BY week DESC
+            LIMIT %s
+        ) recent
+        """,
+        [player_name, season, current_week, window],
+    )
+    row  = cur.fetchone()
+    cols = [d[0] for d in cur.description]
+    cur.close()
+    conn.close()
+    return dict(zip(cols, row)) if row else None
+
+
+# =============================================================================
+# WR/TE — fetch, transform, store, query
+# =============================================================================
+
+def fetch_and_store_wr_stats(seasons: list, weeks: list = None) -> int:
+    """
+    Pull WR and TE stats from nflverse for the given seasons (and optional week
+    filter), transform to our schema, and upsert into nflverse_wr_stats.
+    Returns total rows upserted.
+    """
+    df = nfl.load_player_stats(seasons).to_pandas()
+    wr_df = df[df["position"].isin(["WR", "TE"])].copy()
+
+    if weeks:
+        wr_df = wr_df[wr_df["week"].isin(weeks)]
+
+    conn = _get_conn()
+    cur  = conn.cursor()
+    upserted = 0
+
+    for _, g in wr_df.iterrows():
+        tgts     = _safe(g.get("targets"),               int)   or 0
+        recs     = _safe(g.get("receptions"),            int)   or 0
+        recv_yds = _safe(g.get("receiving_yards"),       int)   or 0
+        recv_epa = _safe(g.get("receiving_epa"),         float) or 0.0
+        recv_fds = _safe(g.get("receiving_first_downs"), int)   or 0
+        recv_tds = _safe(g.get("receiving_tds"),         int)   or 0
+
+        catch_rate    = round(recs     / tgts,     4) if tgts > 0 else None
+        ypr           = round(recv_yds / recs,     2) if recs  > 0 else None
+        epa_per_tgt   = round(recv_epa / tgts,     4) if tgts > 0 else None
+        fd_rate       = round(recv_fds / recs,     4) if recs  > 0 else None
+
+        row = {
+            "player_id":                  _safe(g.get("player_id")),
+            "player_name":                _safe(g.get("player_display_name")),
+            "position":                   _safe(g.get("position")),
+            "team":                       _safe(g.get("recent_team")),
+            "season":                     _safe(g.get("season"), int),
+            "week":                       _safe(g.get("week"),   int),
+            "receptions":                 recs,
+            "targets":                    tgts,
+            "receiving_yards":            recv_yds,
+            "receiving_tds":              recv_tds,
+            "receiving_air_yards":        _safe(g.get("receiving_air_yards"),         int),
+            "receiving_yards_after_catch":_safe(g.get("receiving_yards_after_catch"), int),
+            "receiving_first_downs":      recv_fds,
+            "receiving_epa":              recv_epa,
+            "receiving_fumbles":          _safe(g.get("receiving_fumbles"),      int),
+            "receiving_fumbles_lost":     _safe(g.get("receiving_fumbles_lost"), int),
+            "receiving_2pt_conversions":  _safe(g.get("receiving_2pt_conversions"), int),
+            "target_share":               _safe(g.get("target_share"),    float),
+            "air_yards_share":            _safe(g.get("air_yards_share"), float),
+            "wopr":                       _safe(g.get("wopr"),            float),
+            "racr":                       _safe(g.get("racr"),            float),
+            "catch_rate":                 catch_rate,
+            "ypr":                        ypr,
+            "epa_per_target":             epa_per_tgt,
+            "fd_rate":                    fd_rate,
+            "opponent":                   _safe(g.get("opponent_team")),
+            "game_id":                    _safe(g.get("game_id")),
+        }
+
+        cols         = list(row.keys())
+        vals         = [row[c] for c in cols]
+        placeholders = ", ".join(["%s"] * len(cols))
+        col_names    = ", ".join(cols)
+        updates      = ", ".join(
+            f"{c} = EXCLUDED.{c}" for c in cols
+            if c not in ("player_id", "season", "week")
+        )
+
+        sql = f"""
+            INSERT INTO nflverse_wr_stats ({col_names})
+            VALUES ({placeholders})
+            ON CONFLICT (player_id, season, week) DO UPDATE SET {updates}
+        """
+        cur.execute(sql, vals)
+        upserted += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("nflverse_wr_stats: upserted %d rows", upserted)
+    return upserted
+
+
+def get_wr_game_stats(player_name: str, team: str, season: int, week: int) -> Optional[dict]:
+    """Return a single WR/TE's nflverse game row as a dict, or None."""
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM nflverse_wr_stats
+        WHERE player_name = %s AND team = %s AND season = %s AND week = %s
+        LIMIT 1
+        """,
+        [player_name, team, season, week],
+    )
+    row  = cur.fetchone()
+    cols = [d[0] for d in cur.description]
+    cur.close()
+    conn.close()
+    return dict(zip(cols, row)) if row else None
+
+
+def get_wr_rolling_baseline(
+    player_name: str, team: str, season: int, current_week: int, window: int = 5
+) -> Optional[dict]:
+    """
+    Aggregate nflverse WR/TE stats from up to the last `window` weeks before
+    current_week. Returns sums/avgs in the shape expected by
+    calc_wr_te_multiplier_enhanced.
+    """
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            SUM(targets)                AS targets,
+            SUM(receptions)             AS receptions,
+            SUM(receiving_yards)        AS receiving_yards,
+            SUM(receiving_epa)          AS receiving_epa,
+            SUM(receiving_first_downs)  AS receiving_first_downs,
+            AVG(wopr)                   AS wopr,
+            AVG(target_share)           AS target_share,
+            SUM(receiving_fumbles_lost) AS receiving_fumbles_lost
+        FROM (
+            SELECT * FROM nflverse_wr_stats
             WHERE player_name = %s AND season = %s AND week < %s
             ORDER BY week DESC
             LIMIT %s

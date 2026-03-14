@@ -47,6 +47,14 @@ POSITION_WEIGHTS = {
 _DEFAULT_GRADE   = 65.0
 _MULTIPLIER_CAP  = (0.40, 1.60)
 
+# nflverse league-average fallbacks for WR/TE enhanced components
+_WR_NV = {
+    'epa_per_target': 0.0,   # league avg ~0 EPA/target
+    'wopr':           0.30,  # typical WR1 WOPR
+    'target_share':   0.20,  # typical WR1 target share
+    'fd_rate':        0.50,  # ~50% of receptions result in first downs
+}
+
 
 # ── Position-specific multiplier calculators ─────────────────────────────────
 
@@ -371,6 +379,135 @@ def calc_wr_te_multiplier(p: Dict, b: Optional[Dict] = None) -> Optional[float]:
     return _cap(m)
 
 
+def calc_wr_te_multiplier_enhanced(
+    p: Dict,
+    b: Optional[Dict] = None,
+    nv_game: Optional[Dict] = None,
+    nv_base: Optional[Dict] = None,
+) -> Optional[float]:
+    """
+    Enhanced WR/TE multiplier (7 components).
+
+    Sportradar box-score fields (components 1-3 + part of 6):
+      p['targets'], p['receptions'], p['receiving_yards'],
+      p['yards_after_catch'], p['receiving_touchdowns'], p['drops']
+
+    nflverse game fields (nv_game — components 4, 5, 6-fumbles, 7):
+      receiving_epa, targets, receiving_yards, receiving_tds,
+      receiving_first_downs, wopr, target_share, receiving_fumbles_lost
+
+    nflverse baseline fields (nv_base — rolling prior-week sums):
+      receiving_epa, targets, receiving_yards,
+      receiving_first_downs, wopr, target_share, receiving_fumbles_lost
+
+    When nv_game/nv_base are both None, degrades to the original
+    4-component box-score formula.
+    """
+    targets = p.get('targets', 0)
+    if targets < 2:
+        return None
+
+    # ── Sportradar baselines ──────────────────────────────────────────────────
+    catch_rate_base = (b.get('avg_catch_rate') or 0) if b else 0
+    ypr_base        = (b.get('avg_ypr')        or 0) if b else 0
+
+    avg_yac_yards  = float(b.get('avg_yac')             or 0) if b else 0
+    avg_recv_yards = float(b.get('avg_receiving_yards') or 0) if b else 0
+    avg_drops      = float(b.get('avg_drops')           or 0) if b else 0
+    avg_targets_b  = float(b.get('avg_targets')         or 0) if b else 0
+
+    if not catch_rate_base:
+        catch_rate_base = _WR['catch_rate']
+    if not ypr_base:
+        ypr_base = _WR['ypr']
+
+    yac_rate_base  = (avg_yac_yards  / avg_recv_yards) if avg_recv_yards > 0 else _WR['yac_rate']
+    drop_rate_base = (avg_drops      / avg_targets_b)  if avg_targets_b  > 0 else _WR['drop_rate']
+
+    # ── Sportradar game stats ─────────────────────────────────────────────────
+    recs       = p.get('receptions', 0)
+    recv_yards = p.get('receiving_yards', 0)
+    catch_rate = recs / targets
+    ypr        = (recv_yards / recs) if recs > 0 else 0.0
+    yac_rate   = (p.get('yards_after_catch', 0) / recv_yards) if recv_yards > 0 else yac_rate_base
+    drop_rate  = p.get('drops', 0) / targets
+
+    # ── Fallback: no nflverse data — original 4-component formula ────────────
+    if nv_game is None or nv_base is None:
+        m = (
+            (catch_rate / max(catch_rate_base, 0.01)) * 0.40 +
+            (ypr        / max(ypr_base,        0.10)) * 0.30 +
+            (yac_rate   / max(yac_rate_base,   0.01)) * 0.20 +
+            (1 - drop_rate / max(drop_rate_base, 0.01)) * 0.10
+        )
+        m += p.get('receiving_touchdowns', 0) * 0.05
+        return _cap(m)
+
+    # =========================================================================
+    # nflverse-enhanced path (7 components)
+    # =========================================================================
+
+    # COMPONENT 1 — Catch rate (weight: 0.20)  [Sportradar]
+    catch_component = catch_rate / max(catch_rate_base, 0.01)
+
+    # COMPONENT 2 — Yards per reception (weight: 0.15)  [Sportradar]
+    ypr_component = ypr / max(ypr_base, 0.10)
+
+    # COMPONENT 3 — YAC rate (weight: 0.10)  [Sportradar]
+    yac_component = yac_rate / max(yac_rate_base, 0.01)
+
+    # COMPONENT 4 — Receiving EPA per target (weight: 0.20)  [nflverse]
+    game_recv_epa  = float(nv_game.get('receiving_epa') or 0.0)
+    game_tgts_nv   = float(nv_game.get('targets')       or targets)
+    base_recv_epa  = float(nv_base.get('receiving_epa') or 0.0)
+    base_tgts_nv   = float(nv_base.get('targets')       or 0.0)
+
+    game_epa_pt = game_recv_epa / game_tgts_nv if game_tgts_nv > 0 else 0.0
+    base_epa_pt = (base_recv_epa / base_tgts_nv) if base_tgts_nv > 0 else _WR_NV['epa_per_target']
+
+    epa_component = 1.0 + (game_epa_pt - base_epa_pt) / 0.25  # 0.25 EPA/target ≈ +1.0
+    epa_component = max(0.5, min(1.5, epa_component))
+
+    # COMPONENT 5 — Target share / WOPR (weight: 0.15)  [nflverse]
+    game_wopr = float(nv_game.get('wopr') or nv_game.get('target_share') or 0.0)
+    base_wopr = float(nv_base.get('wopr') or nv_base.get('target_share') or 0.0)
+
+    if base_wopr == 0:
+        base_wopr = _WR_NV['wopr']
+    wopr_component = game_wopr / max(base_wopr, 0.01)
+    wopr_component = max(0.3, min(2.0, wopr_component))
+
+    # COMPONENT 6 — Ball security: drops + fumbles merged (weight: 0.10)
+    #   70% weight on drop rate (routine failure), 30% on fumbles (rare/catastrophic)
+    fumbles_lost   = int(nv_game.get('receiving_fumbles_lost') or 0)
+    drop_component = 1.0 - (drop_rate / max(drop_rate_base, 0.01)) * 0.70
+    drop_component -= fumbles_lost * 0.20
+    ball_security  = max(0.3, min(1.5, drop_component))
+
+    # COMPONENT 7 — First downs + scoring (weight: 0.10)  [nflverse]
+    game_fds    = float(nv_game.get('receiving_first_downs') or 0.0)
+    base_fds    = float(nv_base.get('receiving_first_downs') or 0.0)
+    base_recs_nv = float(nv_base.get('receptions')          or 0.0)
+
+    game_fd_rate = game_fds / recs           if recs > 0         else 0.0
+    base_fd_rate = (base_fds / base_recs_nv) if base_recs_nv > 0 else _WR_NV['fd_rate']
+
+    fd_component  = game_fd_rate / max(base_fd_rate, 0.05)
+    fd_component += p.get('receiving_touchdowns', 0) * 0.05
+    fd_component  = max(0.3, min(2.0, fd_component))
+
+    m = (
+        catch_component * 0.20 +
+        ypr_component   * 0.15 +
+        yac_component   * 0.10 +
+        epa_component   * 0.20 +
+        wopr_component  * 0.15 +
+        ball_security   * 0.10 +
+        fd_component    * 0.10
+    )
+    return _cap(m)
+
+
 def calc_def_multiplier(p: Dict, b: Optional[Dict] = None) -> Optional[float]:
     total_activity = (
         p['tackles'] + p['ast_tackles'] +
@@ -431,7 +568,7 @@ def calc_performance_multiplier(
     if pos in ('RB', 'HB', 'FB'):
         return calc_rb_multiplier_enhanced(p, b, nv_game, nv_base)
     if pos in ('WR', 'TE'):
-        return calc_wr_te_multiplier(p, b)
+        return calc_wr_te_multiplier_enhanced(p, b, nv_game, nv_base)
     if pos in ('DE', 'DT', 'NT', 'EDGE', 'LB', 'ILB', 'OLB', 'MLB',
                'CB', 'S', 'FS', 'SS', 'DB'):
         return calc_def_multiplier(p, b)
