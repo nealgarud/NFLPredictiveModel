@@ -27,6 +27,11 @@ logger.setLevel(logging.INFO)
 # League-average fallbacks used ONLY when no player baseline exists (rookies, etc.)
 _QB = {'comp_pct': 0.65, 'ypa': 7.0, 'td_int_ratio': 1.5, 'sack_rate': 0.065}
 _RB = {'ypc': 4.3, 'yac_per': 2.1, 'bt_rate': 0.08}
+_RB_NV = {
+    'epa_per_carry':    0.0,   # league-avg rushing EPA/carry ≈ 0
+    'receiving_yards':  15.0,  # avg RB receiving yards/game
+    'fd_rate':          0.20,  # ~20% of carries result in first downs
+}
 _WR = {'catch_rate': 0.65, 'ypr': 11.0, 'yac_rate': 0.45, 'drop_rate': 0.04}
 
 POSITION_WEIGHTS = {
@@ -203,6 +208,133 @@ def calc_rb_multiplier(p: Dict, b: Optional[Dict] = None) -> Optional[float]:
     return _cap(rush_m * 0.80 + recv_bonus)
 
 
+def calc_rb_multiplier_enhanced(
+    p: Dict,
+    b: Optional[Dict] = None,
+    nv_game: Optional[Dict] = None,
+    nv_base: Optional[Dict] = None,
+) -> Optional[float]:
+    """
+    Enhanced RB multiplier (7 components).
+
+    Sportradar box-score fields (always available via BoxScoreParser):
+      p['rush_attempts'], p['rush_yards'], p['rush_yards_after_contact'],
+      p['rush_broken_tackles'], p['rush_tlost'], p['receptions'],
+      p['receiving_yards'], p['receiving_touchdowns']
+
+    nflverse game fields (nv_game):
+      rushing_epa, rushing_first_downs, carries,
+      receiving_yards, receiving_tds, receiving_epa,
+      rushing_fumbles_lost, receiving_fumbles_lost
+
+    nflverse baseline fields (nv_base — rolling prior-week sums):
+      carries, rushing_yards, rushing_epa, rushing_first_downs,
+      avg_receiving_yards, rushing_fumbles_lost, receiving_fumbles_lost
+
+    When nv_game/nv_base are both None, degrades cleanly to the original
+    3-component box-score formula + flat receiving bonus.
+    """
+    atts = p['rush_attempts']
+    if atts < 3:
+        return None
+
+    # ── Sportradar baselines ──────────────────────────────────────────────────
+    ypc_base    = (b.get('avg_rush_ypc') or 0) if b else 0
+    yac_base    = (b.get('avg_rush_yac') or 0) if b else 0
+    bt_base_raw = (b.get('avg_rush_broken_tackles') or 0) if b else 0
+
+    if not ypc_base:
+        ypc_base = _RB['ypc']
+    if not yac_base:
+        yac_base = _RB['yac_per']
+
+    avg_atts     = float(b.get('avg_rush_attempts') or 0) if b else 0
+    bt_rate_base = (bt_base_raw / avg_atts) if avg_atts > 0 else _RB['bt_rate']
+
+    # ── Sportradar game stats ─────────────────────────────────────────────────
+    ypc     = p['rush_yards'] / atts
+    yac_per = (p['rush_yards_after_contact'] / atts) if p.get('rush_yards_after_contact', 0) > 0 else yac_base
+    bt_rate = p.get('rush_broken_tackles', 0) / atts
+
+    # ── Fallback: no nflverse data — original 3-component formula ────────────
+    if nv_game is None or nv_base is None:
+        rush_m = (
+            (ypc     / max(ypc_base,     0.1)) * 0.45 +
+            (yac_per / max(yac_base,     0.1)) * 0.35 +
+            (1 + (bt_rate - bt_rate_base) * 3) * 0.20
+        )
+        rush_m -= p.get('rush_tlost', 0) * 0.02
+        recv_bonus = (p.get('receptions', 0) * 0.01) + (p.get('receiving_touchdowns', 0) * 0.05)
+        return _cap(rush_m * 0.80 + recv_bonus)
+
+    # =========================================================================
+    # nflverse-enhanced path (7 components)
+    # =========================================================================
+
+    # COMPONENT 1 — YPC / rushing efficiency (weight: 0.25)  [Sportradar]
+    ypc_component = ypc / max(ypc_base, 0.1)
+
+    # COMPONENT 2 — Yards after contact per carry (weight: 0.15)  [Sportradar]
+    yac_component = yac_per / max(yac_base, 0.1)
+
+    # COMPONENT 3 — Broken tackle rate (weight: 0.10)  [Sportradar]
+    bt_component = 1.0 + (bt_rate - bt_rate_base) * 3.0
+
+    # COMPONENT 4 — Rushing EPA per carry (weight: 0.20)  [nflverse]
+    game_carries  = float(nv_game.get('carries') or atts)
+    game_rush_epa = float(nv_game.get('rushing_epa') or 0.0)
+
+    base_carries  = float(nv_base.get('carries') or 0.0)
+    base_rush_epa = float(nv_base.get('rushing_epa') or 0.0)
+
+    game_epa_pc = game_rush_epa / game_carries if game_carries > 0 else 0.0
+    base_epa_pc = (base_rush_epa / base_carries) if base_carries > 0 else _RB_NV['epa_per_carry']
+
+    epa_component = 1.0 + (game_epa_pc - base_epa_pc) / 0.2   # 0.2 EPA/carry ≈ +1.0
+    epa_component = max(0.5, min(1.5, epa_component))
+
+    # COMPONENT 5 — Receiving value (weight: 0.15)  [nflverse]
+    game_recv_yds  = float(nv_game.get('receiving_yards') or p.get('receiving_yards') or 0.0)
+    game_recv_tds  = int(nv_game.get('receiving_tds')     or p.get('receiving_touchdowns') or 0)
+    base_recv_yds  = float(nv_base.get('avg_receiving_yards') or _RB_NV['receiving_yards'])
+
+    recv_component = game_recv_yds / max(base_recv_yds, 10.0)
+    recv_component = max(0.3, min(2.0, recv_component))
+    recv_component += game_recv_tds * 0.05
+
+    # COMPONENT 6 — First down rate (weight: 0.10)  [nflverse]
+    game_fds       = float(nv_game.get('rushing_first_downs') or 0.0)
+    base_fds_sum   = float(nv_base.get('rushing_first_downs') or 0.0)
+
+    game_fd_rate   = game_fds / game_carries    if game_carries > 0 else 0.0
+    base_fd_rate   = (base_fds_sum / base_carries) if base_carries > 0 else _RB_NV['fd_rate']
+
+    fd_component = game_fd_rate / max(base_fd_rate, 0.05)
+    fd_component = max(0.5, min(2.0, fd_component))
+
+    # COMPONENT 7 — Ball security (weight: 0.05)  [nflverse]
+    fumbles_lost   = (
+        int(nv_game.get('rushing_fumbles_lost')   or 0) +
+        int(nv_game.get('receiving_fumbles_lost') or 0)
+    )
+    fumble_component = max(0.4, 1.0 - fumbles_lost * 0.15)
+
+    # ── Negative adjustment: tackles for loss (Sportradar) ───────────────────
+    tlost_penalty = p.get('rush_tlost', 0) * 0.02
+
+    m = (
+        ypc_component    * 0.25 +
+        yac_component    * 0.15 +
+        bt_component     * 0.10 +
+        epa_component    * 0.20 +
+        recv_component   * 0.15 +
+        fd_component     * 0.10 +
+        fumble_component * 0.05
+    ) - tlost_penalty
+
+    return _cap(m)
+
+
 def calc_wr_te_multiplier(p: Dict, b: Optional[Dict] = None) -> Optional[float]:
     targets = p['targets']
     if targets < 2:
@@ -281,18 +413,23 @@ def calc_def_multiplier(p: Dict, b: Optional[Dict] = None) -> Optional[float]:
     return _cap(m)
 
 
-def calc_performance_multiplier(p: Dict, b: Optional[Dict] = None) -> Optional[float]:
+def calc_performance_multiplier(
+    p: Dict,
+    b: Optional[Dict] = None,
+    nv_game: Optional[Dict] = None,
+    nv_base: Optional[Dict] = None,
+) -> Optional[float]:
     """
-    Route to the correct position multiplier, passing the player's
-    season-avg baseline dict b.
+    Route to the correct position multiplier.
+
+    nv_game / nv_base are nflverse per-game and rolling-baseline dicts.
+    Pass None for both to use the original box-score-only formulas.
     """
     pos = (p.get('position') or '').upper()
     if pos == 'QB':
-        # For now nv_game/nv_base are None; this keeps existing behavior.
-        # When nflverse data is wired in, pass those dicts through here.
-        return calc_qb_multiplier_enhanced(p, b)
+        return calc_qb_multiplier_enhanced(p, b, nv_game, nv_base)
     if pos in ('RB', 'HB', 'FB'):
-        return calc_rb_multiplier(p, b)
+        return calc_rb_multiplier_enhanced(p, b, nv_game, nv_base)
     if pos in ('WR', 'TE'):
         return calc_wr_te_multiplier(p, b)
     if pos in ('DE', 'DT', 'NT', 'EDGE', 'LB', 'ILB', 'OLB', 'MLB',
