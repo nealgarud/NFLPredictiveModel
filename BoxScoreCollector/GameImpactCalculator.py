@@ -34,6 +34,15 @@ _RB_NV = {
 }
 _WR = {'catch_rate': 0.65, 'ypr': 11.0, 'yac_rate': 0.45, 'drop_rate': 0.04}
 
+# League-average fallbacks for OL team-proxy components
+_OL_NV = {
+    'sack_rate':        0.065,  # ~6.5% of dropbacks result in a sack
+    'team_ypc':         4.3,    # league-avg team YPC
+    'team_rush_epa_pc': 0.0,    # league-avg rushing EPA per carry ≈ 0
+    'ol_penalties':     1.5,    # avg OL penalties per game per team
+    'pressure_rate':    0.30,   # ~30% of dropbacks involve some pressure
+}
+
 POSITION_WEIGHTS = {
     'QB':   3.0,
     'RB':   1.5, 'HB': 1.5, 'FB': 0.5,
@@ -508,6 +517,107 @@ def calc_wr_te_multiplier_enhanced(
     return _cap(m)
 
 
+def calc_ol_multiplier(
+    p: Dict,
+    b: Optional[Dict] = None,
+    nv_game: Optional[Dict] = None,
+    nv_base: Optional[Dict] = None,
+) -> Optional[float]:
+    """
+    Team-proxy OL multiplier (5 components).
+
+    OL players have no individual game stats in nflverse or Sportradar.
+    Instead, the caller builds a team-level context dict from the game's
+    already-processed QB and RB stats and passes it as nv_game/nv_base.
+    The same multiplier is applied to all OL starters for that team/game.
+
+    nv_game keys (team-level, assembled by caller):
+      team_sacks_suffered   — QB sacks_suffered this game
+      team_pass_attempts    — QB attempts this game
+      team_rushing_yards    — sum of RB rushing_yards this game
+      team_carries          — sum of RB carries this game
+      team_rushing_epa      — sum of RB rushing_epa this game
+      team_ol_penalties     — OL holding/false-start penalties (Sportradar, optional)
+      team_hurries          — QB times_hurried (Sportradar, optional)
+      team_knockdowns       — QB knockdowns (Sportradar, optional)
+
+    nv_base keys (rolling prior-week team averages, assembled by caller):
+      base_sack_rate        — rolling avg (sacks / dropbacks)
+      base_team_ypc         — rolling avg team YPC
+      base_team_rush_epa    — rolling avg team rushing EPA (total, not per carry)
+      base_carries          — rolling avg team carries (for EPA normalization)
+      base_ol_penalties     — rolling avg team OL penalties per game
+      base_pressure_rate    — rolling avg pressure rate (optional)
+
+    When nv_game/nv_base are both None → returns 1.0 (neutral, same as current
+    fall-through behavior in calc_performance_multiplier).
+    """
+    if nv_game is None or nv_base is None:
+        return 1.0
+
+    # ── COMPONENT 1 — Pass protection (weight: 0.35) ─────────────────────────
+    sacks     = float(nv_game.get('team_sacks_suffered') or 0.0)
+    pass_atts = float(nv_game.get('team_pass_attempts')  or 0.0)
+    dropbacks = pass_atts + sacks
+
+    game_sack_rate = sacks / dropbacks if dropbacks > 0 else 0.0
+    base_sack_rate = float(nv_base.get('base_sack_rate') or _OL_NV['sack_rate'])
+
+    pass_prot = 1.0 - (game_sack_rate - base_sack_rate) * 8.0
+    pass_prot = max(0.5, min(1.5, pass_prot))
+
+    # ── COMPONENT 2 — Run blocking efficiency (weight: 0.30) ─────────────────
+    rush_yds = float(nv_game.get('team_rushing_yards') or 0.0)
+    carries  = float(nv_game.get('team_carries')       or 0.0)
+
+    game_ypc      = rush_yds / carries if carries > 0 else 0.0
+    base_team_ypc = float(nv_base.get('base_team_ypc') or _OL_NV['team_ypc'])
+
+    run_block = game_ypc / max(base_team_ypc, 0.10)
+    run_block = max(0.5, min(1.5, run_block))
+
+    # ── COMPONENT 3 — Rushing EPA proxy (weight: 0.20) ───────────────────────
+    game_rush_epa  = float(nv_game.get('team_rushing_epa') or 0.0)
+    base_rush_epa  = float(nv_base.get('base_team_rush_epa') or 0.0)
+    base_carries   = float(nv_base.get('base_carries') or carries or 1.0)
+
+    # Normalise to per-carry delta so volume differences don't dominate
+    game_epa_pc = game_rush_epa / carries       if carries      > 0 else 0.0
+    base_epa_pc = base_rush_epa / base_carries  if base_carries > 0 else _OL_NV['team_rush_epa_pc']
+
+    epa_component = 1.0 + (game_epa_pc - base_epa_pc) / 0.15  # 0.15 EPA/carry delta ≈ +1.0
+    epa_component = max(0.5, min(1.5, epa_component))
+
+    # ── COMPONENT 4 — Penalty discipline (weight: 0.10) ──────────────────────
+    game_penalties = float(nv_game.get('team_ol_penalties') or 0.0)
+    base_penalties = float(nv_base.get('base_ol_penalties') or _OL_NV['ol_penalties'])
+
+    penalty_component = 1.0 - (game_penalties - base_penalties) * 0.08
+    penalty_component = max(0.5, min(1.3, penalty_component))
+
+    # ── COMPONENT 5 — QB pressure proxy (weight: 0.05) ───────────────────────
+    hurries     = float(nv_game.get('team_hurries')    or 0.0)
+    knockdowns  = float(nv_game.get('team_knockdowns') or 0.0)
+
+    base_pressure_rate = float(nv_base.get('base_pressure_rate') or _OL_NV['pressure_rate'])
+
+    if dropbacks > 0 and (hurries > 0 or knockdowns > 0):
+        game_pressure_rate = (hurries + knockdowns) / dropbacks
+        pressure_component = 1.0 - (game_pressure_rate - base_pressure_rate) * 3.0
+        pressure_component = max(0.5, min(1.3, pressure_component))
+    else:
+        pressure_component = 1.0  # no Sportradar pressure data → neutral
+
+    m = (
+        pass_prot         * 0.35 +
+        run_block         * 0.30 +
+        epa_component     * 0.20 +
+        penalty_component * 0.10 +
+        pressure_component * 0.05
+    )
+    return _cap(m)
+
+
 def calc_def_multiplier(p: Dict, b: Optional[Dict] = None) -> Optional[float]:
     total_activity = (
         p['tackles'] + p['ast_tackles'] +
@@ -569,6 +679,8 @@ def calc_performance_multiplier(
         return calc_rb_multiplier_enhanced(p, b, nv_game, nv_base)
     if pos in ('WR', 'TE'):
         return calc_wr_te_multiplier_enhanced(p, b, nv_game, nv_base)
+    if pos in ('LT', 'RT', 'LG', 'RG', 'C', 'OL', 'G', 'T'):
+        return calc_ol_multiplier(p, b, nv_game, nv_base)
     if pos in ('DE', 'DT', 'NT', 'EDGE', 'LB', 'ILB', 'OLB', 'MLB',
                'CB', 'S', 'FS', 'SS', 'DB'):
         return calc_def_multiplier(p, b)
