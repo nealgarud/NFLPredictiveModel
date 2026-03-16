@@ -555,7 +555,7 @@ def calc_ol_multiplier(
     if nv_game is None or nv_base is None:
         return 1.0
 
-    # ── COMPONENT 1 — Pass protection (weight: 0.35) ─────────────────────────
+    # ── COMPONENT 1 — Pass protection (weight: 0.40) ─────────────────────────
     sacks     = float(nv_game.get('team_sacks_suffered') or 0.0)
     pass_atts = float(nv_game.get('team_pass_attempts')  or 0.0)
     dropbacks = pass_atts + sacks
@@ -566,7 +566,7 @@ def calc_ol_multiplier(
     pass_prot = 1.0 - (game_sack_rate - base_sack_rate) * 8.0
     pass_prot = max(0.5, min(1.5, pass_prot))
 
-    # ── COMPONENT 2 — Run blocking efficiency (weight: 0.30) ─────────────────
+    # ── COMPONENT 2 — Run blocking efficiency (weight: 0.25) ─────────────────
     rush_yds = float(nv_game.get('team_rushing_yards') or 0.0)
     carries  = float(nv_game.get('team_carries')       or 0.0)
 
@@ -576,7 +576,7 @@ def calc_ol_multiplier(
     run_block = game_ypc / max(base_team_ypc, 0.10)
     run_block = max(0.5, min(1.5, run_block))
 
-    # ── COMPONENT 3 — Rushing EPA proxy (weight: 0.20) ───────────────────────
+    # ── COMPONENT 3 — Rushing EPA proxy (weight: 0.15) ───────────────────────
     game_rush_epa  = float(nv_game.get('team_rushing_epa') or 0.0)
     base_rush_epa  = float(nv_base.get('base_team_rush_epa') or 0.0)
     base_carries   = float(nv_base.get('base_carries') or carries or 1.0)
@@ -595,7 +595,7 @@ def calc_ol_multiplier(
     penalty_component = 1.0 - (game_penalties - base_penalties) * 0.08
     penalty_component = max(0.5, min(1.3, penalty_component))
 
-    # ── COMPONENT 5 — QB pressure proxy (weight: 0.05) ───────────────────────
+    # ── COMPONENT 5 — QB pressure proxy (weight: 0.10) ───────────────────────
     hurries     = float(nv_game.get('team_hurries')    or 0.0)
     knockdowns  = float(nv_game.get('team_knockdowns') or 0.0)
 
@@ -609,11 +609,11 @@ def calc_ol_multiplier(
         pressure_component = 1.0  # no Sportradar pressure data → neutral
 
     m = (
-        pass_prot         * 0.35 +
-        run_block         * 0.30 +
-        epa_component     * 0.20 +
-        penalty_component * 0.10 +
-        pressure_component * 0.05
+        pass_prot          * 0.40 +
+        run_block          * 0.25 +
+        epa_component      * 0.15 +
+        penalty_component  * 0.10 +
+        pressure_component * 0.10
     )
     return _cap(m)
 
