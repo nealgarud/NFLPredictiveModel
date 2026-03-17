@@ -660,6 +660,224 @@ def calc_def_multiplier(p: Dict, b: Optional[Dict] = None) -> Optional[float]:
     return _cap(m)
 
 
+def calc_front7_multiplier(
+    p: Dict,
+    b: Optional[Dict] = None,
+    nv_game: Optional[Dict] = None,
+    nv_base: Optional[Dict] = None,
+) -> Optional[float]:
+    """
+    Multiplier for front-7 defensive players: EDGE, DE, DT, NT, LB, ILB, OLB, MLB.
+
+    5 components
+    ───────────────────────────────────────────────────────────
+    1. Pass rush production   (0.35) — sacks×3 + qb_hits×1.5 + hurries×0.75
+    2. Run defense / TFL      (0.25) — tackles + ast×0.5 + tfl×2 vs baseline
+    3. Tackling quality       (0.15) — missed-tackle penalty
+    4. Turnover creation      (0.15) — INTs×1.5 + fumbles_forced×1.0 vs baseline
+    5. Coverage ability       (0.10) — target allow-rate when available; PDs add bonus
+
+    p keys required: tackles, ast_tackles, def_sacks, qb_hits, hurries,
+                     passes_defended, interceptions, tackles_for_loss,
+                     missed_tackles, def_targets, def_completions_allowed,
+                     def_fumbles_forced (optional, defaults 0)
+    b keys (optional baselines): avg_tackles, avg_def_sacks, avg_qb_hits,
+                                  avg_hurries, avg_interceptions,
+                                  avg_fumbles_forced, avg_def_targets,
+                                  avg_def_comp_allowed
+    """
+    total_activity = (
+        float(p['tackles'])         + float(p['ast_tackles']) +
+        float(p['def_sacks'])       + float(p['qb_hits'])     + float(p['hurries']) +
+        float(p['tackles_for_loss'])+ float(p['passes_defended']) + float(p['interceptions'])
+    )
+    if total_activity < 1:
+        return None
+
+    # ── COMPONENT 1 — Pass rush production (weight: 0.35) ────────────────────
+    game_pressure = (
+        float(p['def_sacks']) * 3.0 +
+        float(p['qb_hits'])   * 1.5 +
+        float(p['hurries'])   * 0.75
+    )
+    avg_pressure = 0.0
+    if b:
+        avg_pressure = (
+            float(b.get('avg_def_sacks') or 0) * 3.0 +
+            float(b.get('avg_qb_hits')   or 0) * 1.5 +
+            float(b.get('avg_hurries')   or 0) * 0.75
+        )
+    # Delta normalised by baseline; floor at 0.5 so one quiet game ≠ disaster
+    pressure_denom = max(avg_pressure, 2.0)
+    pressure_m = 1.0 + (game_pressure - avg_pressure) / pressure_denom
+    pressure_m = max(0.5, min(1.8, pressure_m))
+
+    # ── COMPONENT 2 — Run defense / TFL (weight: 0.25) ───────────────────────
+    run_stop = (
+        float(p['tackles'])          +
+        float(p['ast_tackles']) * 0.5 +
+        float(p['tackles_for_loss']) * 2.0
+    )
+    avg_run_stop = max(float(b.get('avg_tackles') or 3.0) if b else 3.0, 0.5)
+    run_m = 1.0 + (run_stop - avg_run_stop) * 0.08
+    run_m = max(0.5, min(1.8, run_m))
+
+    # ── COMPONENT 3 — Tackling quality (weight: 0.15) ────────────────────────
+    tackle_quality_m = 1.0 - float(p['missed_tackles']) * 0.15
+    tackle_quality_m = max(0.5, min(1.2, tackle_quality_m))
+
+    # ── COMPONENT 4 — Turnover creation (weight: 0.15) ───────────────────────
+    to_score = (
+        float(p['interceptions'])              * 1.5 +
+        float(p.get('def_fumbles_forced', 0))  * 1.0
+    )
+    avg_to = 0.0
+    if b:
+        avg_to = (
+            float(b.get('avg_interceptions')  or 0) * 1.5 +
+            float(b.get('avg_fumbles_forced') or 0) * 1.0
+        )
+    turnover_m = 1.0 + (to_score - avg_to) * 0.30
+    turnover_m = max(0.7, min(1.8, turnover_m))
+
+    # ── COMPONENT 5 — Coverage ability (weight: 0.10) ────────────────────────
+    # Uses target/completion data when available (Sportradar); falls back to PDs
+    coverage_m = 1.0
+    if float(p.get('def_targets', 0)) > 0:
+        allow_rate = float(p['def_completions_allowed']) / float(p['def_targets'])
+        avg_allow  = 0.65
+        if b and float(b.get('avg_def_targets') or 0) > 0:
+            avg_allow = float(b.get('avg_def_comp_allowed') or 0) / float(b['avg_def_targets'])
+        coverage_m = 1.0 + (avg_allow - allow_rate) * 0.8
+    coverage_m += float(p['passes_defended']) * 0.04 + float(p['interceptions']) * 0.05
+    coverage_m = max(0.6, min(1.5, coverage_m))
+
+    m = (
+        pressure_m       * 0.35 +
+        run_m            * 0.25 +
+        tackle_quality_m * 0.15 +
+        turnover_m       * 0.15 +
+        coverage_m       * 0.10
+    )
+    return _cap(m)
+
+
+def calc_secondary_multiplier(
+    p: Dict,
+    b: Optional[Dict] = None,
+    nv_game: Optional[Dict] = None,
+    nv_base: Optional[Dict] = None,
+) -> Optional[float]:
+    """
+    Multiplier for secondary defenders: CB, S, FS, SS, DB, SAF.
+
+    5 components
+    ───────────────────────────────────────────────────────────
+    1. Coverage lockdown         (0.35) — allow-rate vs baseline; PDs + INTs bonus
+    2. Playmaking / disruption   (0.25) — PDs×0.5 + INTs×1.5 + ff×1.0 vs baseline
+    3. Tackling quality          (0.20) — tackles vs baseline, missed-tackle penalty
+    4. Turnover creation         (0.15) — INTs×2.0 + fumbles_forced×1.0 vs baseline
+    5. Blitz / pressure          (0.05) — sacks + qb_hits; tight range (secondary role)
+
+    p keys required: tackles, ast_tackles, def_sacks, qb_hits, hurries,
+                     passes_defended, interceptions, missed_tackles,
+                     def_targets, def_completions_allowed,
+                     def_fumbles_forced (optional, defaults 0)
+    b keys (optional baselines): avg_tackles, avg_def_sacks, avg_qb_hits,
+                                  avg_hurries, avg_passes_defended,
+                                  avg_interceptions, avg_fumbles_forced,
+                                  avg_def_targets, avg_def_comp_allowed
+    """
+    total_activity = (
+        float(p['tackles'])        + float(p['ast_tackles']) +
+        float(p['passes_defended'])+ float(p['interceptions']) +
+        float(p['def_sacks'])      + float(p['qb_hits'])
+    )
+    if total_activity < 1:
+        return None
+
+    # ── COMPONENT 1 — Coverage lockdown (weight: 0.35) ───────────────────────
+    coverage_m = 1.0
+    if float(p.get('def_targets', 0)) > 0:
+        allow_rate = float(p['def_completions_allowed']) / float(p['def_targets'])
+        avg_allow  = 0.60  # tighter league avg for coverage specialists
+        if b and float(b.get('avg_def_targets') or 0) > 0:
+            avg_allow = float(b.get('avg_def_comp_allowed') or 0) / float(b['avg_def_targets'])
+        coverage_m = 1.0 + (avg_allow - allow_rate) * 1.5
+    # PDs and INTs contribute even without target-level data
+    coverage_m += float(p['passes_defended']) * 0.07 + float(p['interceptions']) * 0.15
+    coverage_m = max(0.4, min(2.0, coverage_m))
+
+    # ── COMPONENT 2 — Playmaking / ball disruption (weight: 0.25) ────────────
+    play_score = (
+        float(p['passes_defended'])            * 0.5  +
+        float(p['interceptions'])              * 1.5  +
+        float(p.get('def_fumbles_forced', 0))  * 1.0
+    )
+    avg_play = 0.0
+    if b:
+        avg_play = (
+            float(b.get('avg_passes_defended') or 0) * 0.5  +
+            float(b.get('avg_interceptions')   or 0) * 1.5  +
+            float(b.get('avg_fumbles_forced')  or 0) * 1.0
+        )
+    play_baseline = max(avg_play, 0.5)
+    # Scale by 0.5 so the ratio doesn't explode on exceptional games
+    play_m = 1.0 + (play_score - avg_play) / play_baseline * 0.5
+    play_m = max(0.5, min(2.5, play_m))
+
+    # ── COMPONENT 3 — Tackling quality (weight: 0.20) ────────────────────────
+    avg_tackles  = float(b.get('avg_tackles') or 4.0) if b else 4.0
+    tackle_score = (
+        float(p['tackles'])          +
+        float(p['ast_tackles']) * 0.5 -
+        float(p['missed_tackles']) * 1.5
+    )
+    tackle_m = 1.0 + (tackle_score - avg_tackles) * 0.05
+    tackle_m = max(0.5, min(1.5, tackle_m))
+
+    # ── COMPONENT 4 — Turnover creation (weight: 0.15) ───────────────────────
+    to_score = (
+        float(p['interceptions'])              * 2.0 +
+        float(p.get('def_fumbles_forced', 0))  * 1.0
+    )
+    avg_to = 0.0
+    if b:
+        avg_to = (
+            float(b.get('avg_interceptions')  or 0) * 2.0 +
+            float(b.get('avg_fumbles_forced') or 0) * 1.0
+        )
+    turnover_m = 1.0 + (to_score - avg_to) * 0.25
+    turnover_m = max(0.7, min(2.0, turnover_m))
+
+    # ── COMPONENT 5 — Blitz / pressure contribution (weight: 0.05) ───────────
+    pressure = (
+        float(p['def_sacks']) * 3.0 +
+        float(p['qb_hits'])   * 1.0 +
+        float(p['hurries'])   * 0.5
+    )
+    avg_pressure = 0.0
+    if b:
+        avg_pressure = (
+            float(b.get('avg_def_sacks') or 0) * 3.0 +
+            float(b.get('avg_qb_hits')   or 0) * 1.0 +
+            float(b.get('avg_hurries')   or 0) * 0.5
+        )
+    pressure_denom = max(avg_pressure, 1.0)
+    # Tight range — blitz is a secondary role for DBs
+    pressure_m = 1.0 + (pressure - avg_pressure) / pressure_denom * 0.4
+    pressure_m = max(0.8, min(1.3, pressure_m))
+
+    m = (
+        coverage_m * 0.35 +
+        play_m     * 0.25 +
+        tackle_m   * 0.20 +
+        turnover_m * 0.15 +
+        pressure_m * 0.05
+    )
+    return _cap(m)
+
+
 def calc_performance_multiplier(
     p: Dict,
     b: Optional[Dict] = None,
@@ -681,9 +899,10 @@ def calc_performance_multiplier(
         return calc_wr_te_multiplier_enhanced(p, b, nv_game, nv_base)
     if pos in ('LT', 'RT', 'LG', 'RG', 'C', 'OL', 'G', 'T'):
         return calc_ol_multiplier(p, b, nv_game, nv_base)
-    if pos in ('DE', 'DT', 'NT', 'EDGE', 'LB', 'ILB', 'OLB', 'MLB',
-               'CB', 'S', 'FS', 'SS', 'DB'):
-        return calc_def_multiplier(p, b)
+    if pos in ('DE', 'DT', 'NT', 'EDGE', 'LB', 'ILB', 'OLB', 'MLB', 'DL'):
+        return calc_front7_multiplier(p, b, nv_game, nv_base)
+    if pos in ('CB', 'S', 'FS', 'SS', 'DB', 'SAF'):
+        return calc_secondary_multiplier(p, b, nv_game, nv_base)
     return None
 
 
