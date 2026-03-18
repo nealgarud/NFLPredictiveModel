@@ -34,9 +34,52 @@ def _get_conn():
         user=os.environ["SUPABASE_DB_USER"],
         password=os.environ["SUPABASE_DB_PASSWORD"],
         port=int(os.environ.get("SUPABASE_DB_PORT", 5432)),
-        timeout=30,
+        timeout=120,
         ssl_context=True,
     )
+
+
+_BATCH_SIZE = 100   # rows per commit+reconnect — keeps each socket session well under timeout
+
+
+def _write_in_batches(rows: list, table: str, conflict_cols: tuple) -> int:
+    """
+    Upsert `rows` (list of dicts, all same keys) into `table`.
+    Reconnects every _BATCH_SIZE rows so no single connection stays open too long.
+    Returns total rows upserted.
+    """
+    if not rows:
+        return 0
+
+    cols        = list(rows[0].keys())
+    placeholders = ", ".join(["%s"] * len(cols))
+    col_names    = ", ".join(cols)
+    updates      = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols
+                             if c not in conflict_cols)
+    conflict     = ", ".join(conflict_cols)
+    sql = (
+        f"INSERT INTO {table} ({col_names}) VALUES ({placeholders}) "
+        f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}"
+    )
+
+    upserted = 0
+    conn = cur = None
+
+    for i, row in enumerate(rows):
+        if i % _BATCH_SIZE == 0:
+            if conn is not None:
+                conn.commit(); cur.close(); conn.close()
+            conn = _get_conn()
+            cur  = conn.cursor()
+            cur.execute("SET statement_timeout = 0")  # override Supabase default
+
+        cur.execute(sql, [row[c] for c in cols])
+        upserted += 1
+
+    if conn is not None:
+        conn.commit(); cur.close(); conn.close()
+
+    return upserted
 
 
 def _safe(val, cast=None):
@@ -62,17 +105,13 @@ def fetch_and_store_qb_stats(seasons: list, weeks: list = None) -> int:
     transform to our schema, and upsert into nflverse_qb_stats.
     Returns total rows upserted.
     """
-    df = nfl.load_player_stats(seasons).to_pandas()
-    qb_df = df[df["position"] == "QB"].copy()
+    df = nfl.load_player_stats(seasons)    qb_df = df.filter(df["position"] == "QB")
 
     if weeks:
-        qb_df = qb_df[qb_df["week"].isin(weeks)]
+        qb_df = qb_df.filter(qb_df["week"].is_in(weeks))
 
-    conn = _get_conn()
-    cur = conn.cursor()
-    upserted = 0
-
-    for _, g in qb_df.iterrows():
+    rows_to_write = []
+    for g in qb_df.iter_rows(named=True):
         atts     = _safe(g.get("attempts"), int)        or 0
         sacks    = _safe(g.get("sacks_suffered"), int)  or 0
         py       = _safe(g.get("passing_yards"), float) or 0.0
@@ -84,7 +123,7 @@ def fetch_and_store_qb_stats(seasons: list, weeks: list = None) -> int:
         adot = round(pay / atts,     2) if atts > 0     else None
         epd  = round(epa / dropbacks, 4) if dropbacks > 0 else None
 
-        row = {
+        rows_to_write.append({
             "player_id":                 _safe(g.get("player_id")),
             "player_name":               _safe(g.get("player_display_name")),
             "team":                      _safe(g.get("recent_team")),
@@ -114,26 +153,10 @@ def fetch_and_store_qb_stats(seasons: list, weeks: list = None) -> int:
             "epa_per_dropback":          epd,
             "opponent":                  _safe(g.get("opponent_team")),
             "game_id":                   _safe(g.get("game_id")),
-        }
+        })
 
-        cols = list(row.keys())
-        vals = [row[c] for c in cols]
-        placeholders = ", ".join(["%s"] * len(cols))
-        col_names    = ", ".join(cols)
-        updates      = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols
-                                 if c not in ("player_id", "season", "week"))
-
-        sql = f"""
-            INSERT INTO nflverse_qb_stats ({col_names})
-            VALUES ({placeholders})
-            ON CONFLICT (player_id, season, week) DO UPDATE SET {updates}
-        """
-        cur.execute(sql, vals)
-        upserted += 1
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    upserted = _write_in_batches(rows_to_write, "nflverse_qb_stats",
+                                 conflict_cols=("player_id", "season", "week"))
     logger.info("nflverse_qb_stats: upserted %d rows", upserted)
     return upserted
 
@@ -196,17 +219,13 @@ def fetch_and_store_rb_stats(seasons: list, weeks: list = None) -> int:
     transform to our schema, and upsert into nflverse_rb_stats.
     Returns total rows upserted.
     """
-    df = nfl.load_player_stats(seasons).to_pandas()
-    rb_df = df[df["position"] == "RB"].copy()
+    df = nfl.load_player_stats(seasons)    rb_df = df.filter(df["position"] == "RB")
 
     if weeks:
-        rb_df = rb_df[rb_df["week"].isin(weeks)]
+        rb_df = rb_df.filter(rb_df["week"].is_in(weeks))
 
-    conn = _get_conn()
-    cur = conn.cursor()
-    upserted = 0
-
-    for _, g in rb_df.iterrows():
+    rows_to_write = []
+    for g in rb_df.iter_rows(named=True):
         carries   = _safe(g.get("carries"),              int)   or 0
         rush_yds  = _safe(g.get("rushing_yards"),        float) or 0.0
         rush_epa  = _safe(g.get("rushing_epa"),          float) or 0.0
@@ -223,7 +242,7 @@ def fetch_and_store_rb_stats(seasons: list, weeks: list = None) -> int:
         total_yards   = (int(rush_yds) if rush_yds else 0) + (recv_yds or 0)
         total_tds     = (rush_tds or 0) + (recv_tds or 0)
 
-        row = {
+        rows_to_write.append({
             "player_id":                    _safe(g.get("player_id")),
             "player_name":                  _safe(g.get("player_display_name")),
             "team":                         _safe(g.get("recent_team")),
@@ -255,26 +274,10 @@ def fetch_and_store_rb_stats(seasons: list, weeks: list = None) -> int:
             "total_tds":                    total_tds,
             "opponent":                     _safe(g.get("opponent_team")),
             "game_id":                      _safe(g.get("game_id")),
-        }
+        })
 
-        cols = list(row.keys())
-        vals = [row[c] for c in cols]
-        placeholders = ", ".join(["%s"] * len(cols))
-        col_names    = ", ".join(cols)
-        updates      = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols
-                                 if c not in ("player_id", "season", "week"))
-
-        sql = f"""
-            INSERT INTO nflverse_rb_stats ({col_names})
-            VALUES ({placeholders})
-            ON CONFLICT (player_id, season, week) DO UPDATE SET {updates}
-        """
-        cur.execute(sql, vals)
-        upserted += 1
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    upserted = _write_in_batches(rows_to_write, "nflverse_rb_stats",
+                                 conflict_cols=("player_id", "season", "week"))
     logger.info("nflverse_rb_stats: upserted %d rows", upserted)
     return upserted
 
@@ -344,17 +347,14 @@ def fetch_and_store_wr_stats(seasons: list, weeks: list = None) -> int:
     filter), transform to our schema, and upsert into nflverse_wr_stats.
     Returns total rows upserted.
     """
-    df = nfl.load_player_stats(seasons).to_pandas()
-    wr_df = df[df["position"].isin(["WR", "TE"])].copy()
+    df = nfl.load_player_stats(seasons)    wr_df = df.filter(df["position"].is_in(["WR", "TE"]))
 
     if weeks:
-        wr_df = wr_df[wr_df["week"].isin(weeks)]
+        wr_df = wr_df.filter(wr_df["week"].is_in(weeks))
 
-    conn = _get_conn()
-    cur  = conn.cursor()
-    upserted = 0
+    rows_to_write = []
 
-    for _, g in wr_df.iterrows():
+    for g in wr_df.iter_rows(named=True):
         tgts     = _safe(g.get("targets"),               int)   or 0
         recs     = _safe(g.get("receptions"),            int)   or 0
         recv_yds = _safe(g.get("receiving_yards"),       int)   or 0
@@ -397,26 +397,10 @@ def fetch_and_store_wr_stats(seasons: list, weeks: list = None) -> int:
             "game_id":                    _safe(g.get("game_id")),
         }
 
-        cols         = list(row.keys())
-        vals         = [row[c] for c in cols]
-        placeholders = ", ".join(["%s"] * len(cols))
-        col_names    = ", ".join(cols)
-        updates      = ", ".join(
-            f"{c} = EXCLUDED.{c}" for c in cols
-            if c not in ("player_id", "season", "week")
-        )
+        rows_to_write.append(row)
 
-        sql = f"""
-            INSERT INTO nflverse_wr_stats ({col_names})
-            VALUES ({placeholders})
-            ON CONFLICT (player_id, season, week) DO UPDATE SET {updates}
-        """
-        cur.execute(sql, vals)
-        upserted += 1
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    upserted = _write_in_batches(rows_to_write, "nflverse_wr_stats",
+                                 conflict_cols=("player_id", "season", "week"))
     logger.info("nflverse_wr_stats: upserted %d rows", upserted)
     return upserted
 
