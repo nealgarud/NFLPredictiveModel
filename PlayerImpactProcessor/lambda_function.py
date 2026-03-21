@@ -194,12 +194,18 @@ def _process_game(
         gid, len(players), len(nflverse_data),
     )
 
-    # 6. Calculate enriched team impacts (two-pass OL + position groups)
+    # 6a. Fetch OL starters + team season averages for the team-proxy multiplier
+    home_ol          = db.get_ol_starters(home, season)
+    away_ol          = db.get_ol_starters(away, season)
+    home_season_avgs = db.get_team_season_averages(home, season, before_week=week)
+    away_season_avgs = db.get_team_season_averages(away, season, before_week=week)
+
+    # 6b. Calculate enriched team impacts (two-pass OL + PFF injection + position groups)
     home_actual, home_expected, home_groups, home_details = calc_team_impacts(
-        players, home, player_baselines, nflverse_data
+        players, home, player_baselines, nflverse_data, home_ol, home_season_avgs
     )
     away_actual, away_expected, away_groups, away_details = calc_team_impacts(
-        players, away, player_baselines, nflverse_data
+        players, away, player_baselines, nflverse_data, away_ol, away_season_avgs
     )
 
     # 7. Upsert enriched player rows

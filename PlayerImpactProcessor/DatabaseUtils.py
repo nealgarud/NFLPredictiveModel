@@ -65,9 +65,9 @@ class DatabaseUtils:
         conn   = self.connect()
         cursor = conn.cursor()
         try:
-            where  = ["sportradar_id IS NOT NULL", "sportradar_id != game_id"]
+            where  = ["sportradar_id IS NOT NULL", "sportradar_id != game_id", "week <= 18"]
             if not force:
-                where.append("box_score_collected_at IS NULL")
+                where.append("player_impact_collected_at IS NULL")
             params: List[Any] = []
 
             if season is not None:
@@ -306,7 +306,7 @@ class DatabaseUtils:
           - home/away performance_surprise
           - position-group impacts (offense, defense, OL)
           - home/away player_details as enriched JSONB
-          - box_score_collected_at timestamp
+          - player_impact_collected_at timestamp
         """
         conn   = self.connect()
         cursor = conn.cursor()
@@ -328,7 +328,7 @@ class DatabaseUtils:
                     home_player_details       = %s,
                     away_player_details       = %s,
                     impact_processor_version  = %s,
-                    box_score_collected_at    = CURRENT_TIMESTAMP
+                    player_impact_collected_at = CURRENT_TIMESTAMP
                 WHERE game_id = %s
                 """,
                 (
@@ -465,6 +465,139 @@ class DatabaseUtils:
         except Exception as e:
             logger.warning("fetch_player_season_stats failed: %s", e)
             return {}
+        finally:
+            cursor.close()
+
+    # ── OL starters + team season averages ───────────────────────────────────
+
+    # game_id_mapping uses JAC/LA; oline_pff_ratings uses JAX/LAR
+    _GIM_TO_PFF = {'JAC': 'JAX', 'LA': 'LAR'}
+
+    def get_ol_starters(
+        self, team: str, season: int, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Return top-`limit` OL starters for `team` in `season` from oline_pff_ratings,
+        ordered by snap_counts_offense DESC.  Filters to position IN ('T','G','C').
+        Returns [] if no data found.
+        """
+        pff_team = self._GIM_TO_PFF.get(team, team)
+        conn   = self.connect()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT player, player_id, position, team_name, season,
+                       grades_offense, grades_pass_block, grades_run_block,
+                       snap_counts_offense, player_game_count,
+                       sacks_allowed, hurries_allowed, pressures_allowed, penalties
+                FROM oline_pff_ratings
+                WHERE team_name = %s
+                  AND season    = %s
+                  AND position IN ('T', 'G', 'C')
+                ORDER BY snap_counts_offense DESC
+                LIMIT %s
+                """,
+                [pff_team, season, limit],
+            )
+            cols = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+            result = [dict(zip(cols, r)) for r in rows]
+            logger.info(
+                "OL starters %s %d: %d found (queried as %s)",
+                team, season, len(result), pff_team,
+            )
+            return result
+        except Exception as e:
+            logger.warning("get_ol_starters failed for %s %d: %s", team, season, e)
+            return []
+        finally:
+            cursor.close()
+
+    def get_team_season_averages(
+        self, team: str, season: int, before_week: Optional[int] = None
+    ) -> Dict[str, float]:
+        """
+        Compute team's season-to-date averages for the OL proxy baseline:
+          - avg_sack_rate          (total sacks / (atts + sacks) across all QB games)
+          - avg_ypc                (total rush_yards / total carries across all RB games)
+          - avg_rush_epa_per_carry (total rushing_epa / total carries from RB games)
+
+        Queries nflverse_qb_stats and nflverse_rb_stats.
+        If before_week is set, only games with week < before_week are included
+        (prevents data leakage for in-season processing).
+        Falls back to league-average constants when no data found.
+        """
+        FALLBACK: Dict[str, float] = {
+            'avg_sack_rate':          0.065,
+            'avg_ypc':                4.3,
+            'avg_rush_epa_per_carry': 0.0,
+        }
+
+        conn   = self.connect()
+        cursor = conn.cursor()
+
+        week_sql   = "AND week < %s" if (before_week and before_week > 1) else ""
+        week_param = [before_week] if (before_week and before_week > 1) else []
+
+        try:
+            # QB sack rate
+            cursor.execute(
+                f"""
+                SELECT COALESCE(SUM(attempts),         0),
+                       COALESCE(SUM(sacks_suffered),   0)
+                FROM nflverse_qb_stats
+                WHERE team = %s AND season = %s {week_sql}
+                """,
+                [team, season] + week_param,
+            )
+            qb_row  = cursor.fetchone()
+            total_atts   = float(qb_row[0])
+            total_sacks  = float(qb_row[1])
+            sack_rate    = (
+                total_sacks / (total_atts + total_sacks)
+                if (total_atts + total_sacks) > 0
+                else FALLBACK['avg_sack_rate']
+            )
+
+            # RB rushing stats
+            cursor.execute(
+                f"""
+                SELECT COALESCE(SUM(carries),       0),
+                       COALESCE(SUM(rushing_yards), 0),
+                       COALESCE(SUM(rushing_epa),   0)
+                FROM nflverse_rb_stats
+                WHERE team = %s AND season = %s {week_sql}
+                """,
+                [team, season] + week_param,
+            )
+            rb_row       = cursor.fetchone()
+            total_carries    = float(rb_row[0])
+            total_rush_yds   = float(rb_row[1])
+            total_rush_epa   = float(rb_row[2])
+            ypc              = (
+                total_rush_yds / total_carries
+                if total_carries > 0
+                else FALLBACK['avg_ypc']
+            )
+            rush_epa_pc      = (
+                total_rush_epa / total_carries
+                if total_carries > 0
+                else FALLBACK['avg_rush_epa_per_carry']
+            )
+
+            return {
+                'avg_sack_rate':          round(sack_rate,   6),
+                'avg_ypc':                round(ypc,         4),
+                'avg_rush_epa_per_carry': round(rush_epa_pc, 6),
+            }
+
+        except Exception as e:
+            logger.warning(
+                "get_team_season_averages failed for %s %d: %s — using fallback",
+                team, season, e,
+            )
+            return FALLBACK
         finally:
             cursor.close()
 

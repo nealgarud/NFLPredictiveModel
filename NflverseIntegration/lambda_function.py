@@ -24,6 +24,7 @@ from NflverseDataFetcher import (
     fetch_and_store_qb_stats,
     fetch_and_store_rb_stats,
     fetch_and_store_wr_stats,
+    fetch_and_store_def_stats,
 )
 
 logger = logging.getLogger()
@@ -41,7 +42,7 @@ def lambda_handler(event, context):
 
     seasons_arg   = event.get("seasons") or ([event["season"]] if "season" in event else [CURRENT_SEASON])
     weeks_arg     = [event["week"]] if "week" in event else None
-    positions_arg = set(p.lower() for p in event.get("positions", ["qb", "rb", "wr"]))
+    positions_arg = set(p.lower() for p in event.get("positions", ["qb", "rb", "wr", "def"]))
 
     logger.info("Running backfill | seasons=%s weeks=%s positions=%s",
                 seasons_arg, weeks_arg, positions_arg)
@@ -77,6 +78,16 @@ def lambda_handler(event, context):
         except Exception as e:
             logger.error("WR/TE backfill failed: %s", e)
             results["wr"] = {"status": "error", "message": str(e)}
+
+    # ── DEF ────────────────────────────────────────────────────────────────────
+    if "def" in positions_arg:
+        try:
+            n = fetch_and_store_def_stats(seasons_arg, weeks=weeks_arg)
+            results["def"] = {"status": "ok", "rows": n}
+            logger.info("DEF backfill complete: %d rows", n)
+        except Exception as e:
+            logger.error("DEF backfill failed: %s", e)
+            results["def"] = {"status": "error", "message": str(e)}
 
     any_error = any(v.get("status") == "error" for v in results.values())
 

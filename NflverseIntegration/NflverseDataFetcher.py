@@ -6,6 +6,7 @@ and upserts into Supabase tables:
   - nflverse_qb_stats
   - nflverse_rb_stats
   - nflverse_wr_stats
+  - nflverse_def_stats
 
 Connection uses pg8000 (same pattern as playerimpact Lambda).
 
@@ -105,7 +106,8 @@ def fetch_and_store_qb_stats(seasons: list, weeks: list = None) -> int:
     transform to our schema, and upsert into nflverse_qb_stats.
     Returns total rows upserted.
     """
-    df = nfl.load_player_stats(seasons)    qb_df = df.filter(df["position"] == "QB")
+    df = nfl.load_player_stats(seasons)
+    qb_df = df.filter((df["position"] == "QB") & (df["week"] <= 18))
 
     if weeks:
         qb_df = qb_df.filter(qb_df["week"].is_in(weeks))
@@ -219,7 +221,8 @@ def fetch_and_store_rb_stats(seasons: list, weeks: list = None) -> int:
     transform to our schema, and upsert into nflverse_rb_stats.
     Returns total rows upserted.
     """
-    df = nfl.load_player_stats(seasons)    rb_df = df.filter(df["position"] == "RB")
+    df = nfl.load_player_stats(seasons)
+    rb_df = df.filter((df["position"] == "RB") & (df["week"] <= 18))
 
     if weeks:
         rb_df = rb_df.filter(rb_df["week"].is_in(weeks))
@@ -347,7 +350,8 @@ def fetch_and_store_wr_stats(seasons: list, weeks: list = None) -> int:
     filter), transform to our schema, and upsert into nflverse_wr_stats.
     Returns total rows upserted.
     """
-    df = nfl.load_player_stats(seasons)    wr_df = df.filter(df["position"].is_in(["WR", "TE"]))
+    df = nfl.load_player_stats(seasons)
+    wr_df = df.filter(df["position"].is_in(["WR", "TE"]) & (df["week"] <= 18))
 
     if weeks:
         wr_df = wr_df.filter(wr_df["week"].is_in(weeks))
@@ -458,4 +462,171 @@ def get_wr_rolling_baseline(
     cols = [d[0] for d in cur.description]
     cur.close()
     conn.close()
+    return dict(zip(cols, row)) if row else None
+
+
+# =============================================================================
+# DEF � fetch, transform, store
+# =============================================================================
+
+_FRONT7_POSITIONS    = {"DE", "DT", "NT", "LB", "ILB", "OLB", "MLB", "EDGE", "DL"}
+_SECONDARY_POSITIONS = {"CB", "S", "FS", "SS", "DB"}
+_ALL_DEF_POSITIONS   = _FRONT7_POSITIONS | _SECONDARY_POSITIONS
+_DEF_SEASONS_MAX     = 2024   # 2025 defensive data not yet included
+
+
+def _build_def_row(g: dict) -> dict:
+    """Transform one nflverse defensive player-game row into our DB schema dict."""
+    return {
+        "player_id":                    _safe(g.get("player_id")),
+        "player_name":                  _safe(g.get("player_display_name")),
+        "position":                     _safe(g.get("position")),
+        "team":                         _safe(g.get("recent_team")),
+        "season":                       _safe(g.get("season"),                      int),
+        "week":                         _safe(g.get("week"),                        int),
+        "def_tackles_solo":             _safe(g.get("def_tackles_solo"),            int),
+        "def_tackles_with_assist":      _safe(g.get("def_tackles_with_assist"),     int),
+        "def_tackle_assists":           _safe(g.get("def_tackle_assists"),          int),
+        "def_tackles_for_loss":         _safe(g.get("def_tackles_for_loss"),        float),
+        "def_tackles_for_loss_yards":   _safe(g.get("def_tackles_for_loss_yards"),  float),
+        "def_sacks":                    _safe(g.get("def_sacks"),                   float),
+        "def_sack_yards":               _safe(g.get("def_sack_yards"),              float),
+        "def_qb_hits":                  _safe(g.get("def_qb_hits"),                 int),
+        "def_interceptions":            _safe(g.get("def_interceptions"),           int),
+        "def_interception_yards":       _safe(g.get("def_interception_yards"),      int),
+        "def_pass_defended":            _safe(g.get("def_pass_defended"),           int),
+        "def_fumbles_forced":           _safe(g.get("def_fumbles_forced"),          int),
+        "def_fumbles":                  _safe(g.get("def_fumbles"),                 int),
+        "def_tds":                      _safe(g.get("def_tds"),                     int),
+        "def_safeties":                 _safe(g.get("def_safeties"),                int),
+        "opponent":                     _safe(g.get("opponent_team")),
+        "game_id":                      _safe(g.get("game_id")),
+    }
+
+
+def fetch_and_store_def_stats(seasons: list, weeks: list = None) -> int:
+    """
+    Pull defensive player stats from nflverse and upsert into two tables:
+      - nflverse_front7_stats    (DE, DT, NT, LB, ILB, OLB, MLB, EDGE, DL)
+      - nflverse_secondary_stats (CB, S, FS, SS, DB)
+    Only includes regular season (week <= 18) and seasons up to 2024.
+    Returns total rows upserted across both tables.
+    """
+    seasons = [s for s in seasons if s <= _DEF_SEASONS_MAX]
+    if not seasons:
+        logger.info("No eligible seasons for DEF backfill (max %d)", _DEF_SEASONS_MAX)
+        return 0
+
+    df = nfl.load_player_stats(seasons)
+    def_df = df.filter(
+        df["position"].is_in(list(_ALL_DEF_POSITIONS)) & (df["week"] <= 18)
+    )
+    if weeks:
+        def_df = def_df.filter(def_df["week"].is_in(weeks))
+
+    front7_rows    = []
+    secondary_rows = []
+
+    for g in def_df.iter_rows(named=True):
+        pos = (g.get("position") or "").upper()
+        row = _build_def_row(g)
+        if pos in _FRONT7_POSITIONS:
+            front7_rows.append(row)
+        elif pos in _SECONDARY_POSITIONS:
+            secondary_rows.append(row)
+
+    conflict = ("player_id", "season", "week")
+    f7  = _write_in_batches(front7_rows,    "nflverse_front7_stats",    conflict)
+    sec = _write_in_batches(secondary_rows, "nflverse_secondary_stats", conflict)
+
+    logger.info("nflverse_front7_stats: upserted %d rows",    f7)
+    logger.info("nflverse_secondary_stats: upserted %d rows", sec)
+    return f7 + sec
+
+
+# ── Query helpers ──────────────────────────────────────────────────────────────
+
+def get_front7_game_stats(player_name: str, team: str, season: int, week: int) -> Optional[dict]:
+    """Return a single front-7 player's nflverse game row as a dict, or None."""
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        "SELECT * FROM nflverse_front7_stats "
+        "WHERE player_name = %s AND team = %s AND season = %s AND week = %s LIMIT 1",
+        [player_name, team, season, week],
+    )
+    row  = cur.fetchone()
+    cols = [d[0] for d in cur.description]
+    cur.close(); conn.close()
+    return dict(zip(cols, row)) if row else None
+
+
+def get_secondary_game_stats(player_name: str, team: str, season: int, week: int) -> Optional[dict]:
+    """Return a single secondary player's nflverse game row as a dict, or None."""
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        "SELECT * FROM nflverse_secondary_stats "
+        "WHERE player_name = %s AND team = %s AND season = %s AND week = %s LIMIT 1",
+        [player_name, team, season, week],
+    )
+    row  = cur.fetchone()
+    cols = [d[0] for d in cur.description]
+    cur.close(); conn.close()
+    return dict(zip(cols, row)) if row else None
+
+
+def get_front7_rolling_baseline(
+    player_name: str, team: str, season: int, current_week: int, window: int = 5
+) -> Optional[dict]:
+    """Aggregate front-7 nflverse stats from the last `window` weeks before current_week."""
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            SUM(def_tackles_solo)       AS tackles_solo,
+            SUM(def_sacks)              AS sacks,
+            SUM(def_tackles_for_loss)   AS tfl,
+            SUM(def_qb_hits)            AS qb_hits,
+            SUM(def_fumbles_forced)     AS fumbles_forced
+        FROM (
+            SELECT * FROM nflverse_front7_stats
+            WHERE player_name = %s AND season = %s AND week < %s
+            ORDER BY week DESC LIMIT %s
+        ) recent
+        """,
+        [player_name, season, current_week, window],
+    )
+    row  = cur.fetchone()
+    cols = [d[0] for d in cur.description]
+    cur.close(); conn.close()
+    return dict(zip(cols, row)) if row else None
+
+
+def get_secondary_rolling_baseline(
+    player_name: str, team: str, season: int, current_week: int, window: int = 5
+) -> Optional[dict]:
+    """Aggregate secondary nflverse stats from the last `window` weeks before current_week."""
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            SUM(def_interceptions)      AS interceptions,
+            SUM(def_pass_defended)      AS pass_defended,
+            SUM(def_tackles_solo)       AS tackles_solo,
+            SUM(def_interception_yards) AS int_yards,
+            SUM(def_fumbles_forced)     AS fumbles_forced
+        FROM (
+            SELECT * FROM nflverse_secondary_stats
+            WHERE player_name = %s AND season = %s AND week < %s
+            ORDER BY week DESC LIMIT %s
+        ) recent
+        """,
+        [player_name, season, current_week, window],
+    )
+    row  = cur.fetchone()
+    cols = [d[0] for d in cur.description]
+    cur.close(); conn.close()
     return dict(zip(cols, row)) if row else None
