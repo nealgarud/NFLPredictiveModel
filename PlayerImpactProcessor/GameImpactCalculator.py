@@ -686,6 +686,15 @@ def calc_performance_multiplier_with_components(
 _OL_FALLBACK = {'avg_sack_rate': 0.065, 'avg_ypc': 4.3, 'avg_rush_epa_per_carry': 0.0}
 
 
+def _position_group(pos: str) -> str:
+    """Return the position_group label for a given position code."""
+    if pos in _OL_POS:
+        return 'offense'   # OL is part of offense (not its own group in JSONB)
+    if pos in _DEF_POS:
+        return 'defense'
+    return 'offense'
+
+
 def calc_ol_team_proxy_multiplier(
     team_game_context: Dict,
     team_season_avgs: Dict,
@@ -743,14 +752,15 @@ def calc_ol_team_proxy_multiplier(
     team_proxy = _cap(team_proxy)
 
     components = {
-        'path':               'ol_team_proxy',
-        'pass_protection':    round(pass_prot,      4),
-        'run_blocking':       round(run_block,      4),
-        'rushing_epa':        round(rush_epa_comp,  4),
-        'penalties':          penalty_comp,
-        'pressure':           pressure_comp,
-        'final':              round(team_proxy,     4),
-        'ol_team_proxy':      True,
+        'path':                'ol_team_proxy',
+        'multiplier_version':  'ol_team_proxy_v1',
+        'pass_protection':     round(pass_prot,      4),
+        'run_blocking':        round(run_block,      4),
+        'rushing_epa':         round(rush_epa_comp,  4),
+        'penalties':           penalty_comp,
+        'pressure':            pressure_comp,
+        'final':               round(team_proxy,     4),
+        'ol_team_proxy':       True,
         'team_sacks_suffered': int(sacks),
         'team_pass_attempts':  int(atts),
         'team_carries':        int(carries),
@@ -941,7 +951,10 @@ def calc_team_impacts(
     # ── OL Injection from oline_pff_ratings ──────────────────────────────────
     # Build synthetic player entries for the top-5 OL starters.  All 5 share
     # the same team-proxy multiplier calculated from the QB/RB context above.
-    if ol_starters and team_qb_ctx:
+    # NOTE: we inject whenever ol_starters is available — no QB-context gate.
+    # If QB context is missing (rare), ol_nv_game has all zeros and the
+    # multiplier falls back to season-average baselines from team_season_avgs.
+    if ol_starters:
         proxy_mult, proxy_components = calc_ol_team_proxy_multiplier(
             ol_nv_game, team_season_avgs or {}
         )
@@ -956,16 +969,19 @@ def calc_team_impacts(
                 'player_name':            ol.get('player') or '',
                 'team':                   team,
                 'position':               ol_pos,
+                'position_key':           ol_pos,
+                'position_group':         'offense',
+                'source':                 'oline_pff_ratings',
                 'pff_grade':              ol_grade,
                 'performance_multiplier': round(proxy_mult, 3),
                 'actual_impact_score':    ol_impact,
+                'multiplier_version':     'ol_team_proxy_v1',
                 'multiplier_components':  {
                     **proxy_components,
                     'pff_grade':        ol_grade,
                     'position_weight':  ol_weight,
                 },
                 'nflverse_enriched': True,
-                'source':            'oline_pff_ratings',
                 # Sportradar stat fields — all zero for injected OL
                 'rush_attempts': 0, 'rush_yards': 0, 'rush_touchdowns': 0,
                 'rush_first_downs': 0, 'rush_yards_after_contact': 0,
@@ -989,11 +1005,13 @@ def calc_team_impacts(
             team_players.append(synthetic)
 
         logger.info(
-            "%s OL injection: %d starters, proxy_mult=%.3f (pass_prot=%.3f run=%.3f epa=%.3f)",
+            "%s OL injection: %d starters, proxy_mult=%.3f "
+            "(pass_prot=%.3f run=%.3f epa=%.3f, qb_ctx=%s)",
             team, len(ol_starters), proxy_mult,
             proxy_components.get('pass_protection', 1.0),
             proxy_components.get('run_blocking',    1.0),
             proxy_components.get('rushing_epa',     1.0),
+            bool(team_qb_ctx),
         )
 
     # ── Aggregate: totals + position groups ──────────────────────────────────
@@ -1034,12 +1052,16 @@ def calc_team_impacts(
             'player_id':              p.get('player_id', ''),
             'player_name':            p.get('player_name', ''),
             'position':               pos,
+            'position_key':           p.get('position_key', pos),
+            'position_group':         p.get('position_group', _position_group(pos)),
             'pff_grade':              round(pff_grade, 1),
             'weight':                 weight,
             'performance_multiplier': multiplier,
+            'multiplier_version':     p.get('multiplier_version', ''),
             'actual_impact_score':    p.get('actual_impact_score', 0.0),
             'nflverse_enriched':      p.get('nflverse_enriched', False),
             'multiplier_components':  p.get('multiplier_components', {}),
+            'source':                 p.get('source', 'sportradar'),
         })
 
     if total_weight == 0:
