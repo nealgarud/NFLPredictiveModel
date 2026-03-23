@@ -14,17 +14,19 @@ For each game in game_id_mapping (filtered by season/week):
   8. Write position-group impacts + player_details JSONB → game_id_mapping
 
 Event formats:
-    {}                                  -- all uncollected games
-    {"season": 2024}                    -- one season
-    {"season": 2024, "week": 10}        -- one week
-    {"season": 2024, "limit": 5}        -- limited batch
-    {"force": true, "season": 2024}     -- re-collect already processed games
-    {                                   -- single game test
+    {}                                           -- all uncollected games (live)
+    {"season": 2024}                             -- one season (live)
+    {"season": 2024, "week": 10}                 -- one week (live)
+    {"season": 2024, "limit": 5}                 -- limited batch (live)
+    {"force": true, "season": 2024}              -- re-collect already processed (live)
+    {                                            -- single game test (live)
         "game_id": "2024_10_BUF_KC",
         "sportradar_id": "uuid-here",
         "season": 2024, "week": 10,
         "home_team": "KC", "away_team": "BUF"
     }
+    {"mode": "backfill", "seasons": [2022,2023,2024]} -- DB-only backfill (no API)
+    {"mode": "backfill", "seasons": [2022], "week": 1} -- backfill single week
 
 SQS trigger format (Records wrapper parsed automatically):
     {"Records": [{"body": "{\"season\": 2023, \"week\": 1}"}]}
@@ -88,6 +90,10 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
                 'statusCode': 200,
                 'body': json.dumps({'success': True, 'result': result}, default=str),
             }
+
+        # ── Backfill mode (DB-only, no Sportradar) ───────────────────────────
+        if event.get('mode') == 'backfill':
+            return _run_backfill(event, db, nflverse)
 
         # ── Batch mode ────────────────────────────────────────────────────────
         season = event.get('season')
@@ -235,4 +241,155 @@ def _process_game(
         'away_surprise':     away_surprise,
         'home_groups':       home_groups,
         'away_groups':       away_groups,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backfill mode — reads from DB, makes zero Sportradar API calls
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_backfill(event: Dict, db: DatabaseUtils, nflverse: NflverseReader) -> Dict:
+    """
+    Process one or more seasons from existing DB data.
+    Event: {"mode": "backfill", "seasons": [2022, 2023, 2024], "week": <optional>}
+
+    All data is read from Supabase tables:
+      - player_game_stats    → box score / player stats
+      - nflverse_*_stats     → EPA, CPOE, WOPR, etc.
+      - oline_pff_ratings    → OL starters
+    Impacts are written back to game_id_mapping. Zero Sportradar API calls.
+    """
+    seasons     = event.get('seasons', [2022, 2023, 2024])
+    week_filter = event.get('week')
+
+    if not isinstance(seasons, list):
+        seasons = [seasons]
+
+    total_success = 0
+    total_games   = 0
+    all_results: List[Dict] = []
+
+    for season in seasons:
+        games = db.fetch_games_to_process(
+            season=season,
+            week=week_filter,
+            force=True,   # always reprocess in backfill — game already collected
+        )
+        logger.info("Backfill season %d: %d games", season, len(games))
+
+        for i, game in enumerate(games, 1):
+            gid = game['game_id']
+            logger.info("[S%d %d/%d] %s", season, i, len(games), gid)
+            try:
+                result = _backfill_game(game, db, nflverse)
+                if result['success']:
+                    total_success += 1
+                all_results.append({'game_id': gid, **result})
+            except Exception as exc:
+                logger.error("Backfill failed %s: %s", gid, exc, exc_info=True)
+                all_results.append({'game_id': gid, 'success': False, 'error': str(exc)})
+
+            total_games += 1
+
+    logger.info("Backfill done: %d/%d successful", total_success, total_games)
+    return {
+        'statusCode': 200,
+        'body': json.dumps({
+            'success':         True,
+            'mode':            'backfill',
+            'games_processed': total_success,
+            'total_games':     total_games,
+            'seasons':         seasons,
+        }, default=str),
+    }
+
+
+def _backfill_game(
+    game: Dict,
+    db: DatabaseUtils,
+    nflverse: NflverseReader,
+) -> Dict:
+    """
+    Recalculate all multipliers + OL impact for one game using DB data only.
+    Writes updated impacts to game_id_mapping. Does NOT call Sportradar.
+    """
+    gid    = game['game_id']
+    home   = game['home_team']
+    away   = game['away_team']
+    season = game['season']
+    week   = game['week']
+
+    # 1. Read player stats from player_game_stats (no Sportradar)
+    players = db.fetch_players_from_game(gid)
+    if not players:
+        logger.warning("Backfill %s: no players in DB — skipping", gid)
+        return {'success': False, 'reason': 'no_players_in_db'}
+
+    # 2. Player-season baselines
+    player_ids       = [p['player_id'] for p in players if p.get('player_id')]
+    player_baselines = db.fetch_player_season_stats(player_ids, season)
+
+    # 3. Nflverse game stats + rolling baselines from DB
+    try:
+        nflverse_game      = nflverse.fetch_game_nflverse(season, week)
+        nflverse_baselines = nflverse.fetch_nflverse_baselines(season, week)
+    except Exception as exc:
+        logger.warning("NflverseReader failed S%d W%d (%s): %s — box-score only",
+                       season, week, gid, exc)
+        nflverse_game      = {}
+        nflverse_baselines = {}
+
+    # 4. Build nflverse_data lookup keyed by player_id (matched by normalised name)
+    nflverse_data: Dict[str, Dict] = {}
+    for p in players:
+        norm_name = _norm(p.get('player_name') or '')
+        nv_game   = nflverse_game.get(norm_name)
+        nv_base   = nflverse_baselines.get(norm_name)
+        if nv_game or nv_base:
+            nflverse_data[p.get('player_id', '')] = {
+                'nv_game': nv_game,
+                'nv_base': nv_base,
+            }
+
+    logger.info(
+        "Backfill %s: %d players from DB, %d nflverse matches",
+        gid, len(players), len(nflverse_data),
+    )
+
+    # 5. OL starters + team season averages
+    home_ol          = db.get_ol_starters(home, season)
+    away_ol          = db.get_ol_starters(away, season)
+    home_season_avgs = db.get_team_season_averages(home, season, before_week=week)
+    away_season_avgs = db.get_team_season_averages(away, season, before_week=week)
+
+    # 6. Recalculate enriched team impacts
+    home_actual, home_expected, home_groups, home_details = calc_team_impacts(
+        players, home, player_baselines, nflverse_data, home_ol, home_season_avgs,
+    )
+    away_actual, away_expected, away_groups, away_details = calc_team_impacts(
+        players, away, player_baselines, nflverse_data, away_ol, away_season_avgs,
+    )
+
+    # 7. Write updated impacts to game_id_mapping (player_game_stats unchanged)
+    home_surprise = calc_performance_surprise(home_actual, home_expected)
+    away_surprise = calc_performance_surprise(away_actual, away_expected)
+
+    db.update_game_with_enriched_impact(
+        gid,
+        home_actual,   away_actual,
+        home_surprise, away_surprise,
+        home_groups,   away_groups,
+        home_details,  away_details,
+    )
+
+    return {
+        'success':          True,
+        'players_from_db':  len(players),
+        'nflverse_matches': len(nflverse_data),
+        'home_actual':      home_actual,
+        'away_actual':      away_actual,
+        'home_ol_impact':   home_groups.get('ol_impact', 0.0),
+        'away_ol_impact':   away_groups.get('ol_impact', 0.0),
+        'home_surprise':    home_surprise,
+        'away_surprise':    away_surprise,
     }

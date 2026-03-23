@@ -601,6 +601,91 @@ class DatabaseUtils:
         finally:
             cursor.close()
 
+    # ── Backfill: read existing player rows from DB ───────────────────────────
+
+    def fetch_players_from_game(self, game_id: str) -> List[Dict[str, Any]]:
+        """
+        Read all player rows for a game from player_game_stats.
+        Returns list of dicts with the same field names expected by
+        calc_team_impacts / position-multiplier functions.
+        Used in backfill mode so no Sportradar API call is needed.
+        """
+        conn   = self.connect()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    game_id, sportradar_game_id, player_id, player_name,
+                    team, position, season, week,
+                    COALESCE(rush_attempts,            0)    AS rush_attempts,
+                    COALESCE(rush_yards,               0)    AS rush_yards,
+                    COALESCE(rush_touchdowns,          0)    AS rush_touchdowns,
+                    COALESCE(rush_first_downs,         0)    AS rush_first_downs,
+                    COALESCE(rush_yards_after_contact, 0)    AS rush_yards_after_contact,
+                    COALESCE(rush_broken_tackles,      0)    AS rush_broken_tackles,
+                    COALESCE(rush_tlost,               0)    AS rush_tlost,
+                    COALESCE(scrambles,                0)    AS scrambles,
+                    COALESCE(pass_attempts,            0)    AS pass_attempts,
+                    COALESCE(pass_completions,         0)    AS pass_completions,
+                    COALESCE(pass_yards,               0)    AS pass_yards,
+                    COALESCE(pass_touchdowns,          0)    AS pass_touchdowns,
+                    COALESCE(pass_interceptions,       0)    AS pass_interceptions,
+                    COALESCE(pass_air_yards,           0)    AS pass_air_yards,
+                    COALESCE(pass_on_target,           0)    AS pass_on_target,
+                    COALESCE(pass_poorly_thrown,       0)    AS pass_poorly_thrown,
+                    COALESCE(sacks_taken,              0)    AS sacks_taken,
+                    COALESCE(sack_yards,               0)    AS sack_yards,
+                    avg_pocket_time,
+                    COALESCE(times_blitzed,            0)    AS times_blitzed,
+                    COALESCE(times_hurried,            0)    AS times_hurried,
+                    COALESCE(targets,                  0)    AS targets,
+                    COALESCE(receptions,               0)    AS receptions,
+                    COALESCE(receiving_yards,          0)    AS receiving_yards,
+                    COALESCE(receiving_touchdowns,     0)    AS receiving_touchdowns,
+                    COALESCE(yards_after_catch,        0)    AS yards_after_catch,
+                    COALESCE(drops,                    0)    AS drops,
+                    COALESCE(tackles,                  0)    AS tackles,
+                    COALESCE(ast_tackles,              0)    AS ast_tackles,
+                    COALESCE(missed_tackles,           0)    AS missed_tackles,
+                    COALESCE(def_sacks,                0)    AS def_sacks,
+                    COALESCE(def_sack_yards,           0)    AS def_sack_yards,
+                    COALESCE(qb_hits,                  0)    AS qb_hits,
+                    COALESCE(hurries,                  0)    AS hurries,
+                    COALESCE(knockdowns,               0)    AS knockdowns,
+                    COALESCE(passes_defended,          0)    AS passes_defended,
+                    COALESCE(interceptions,            0)    AS interceptions,
+                    COALESCE(int_yards,                0)    AS int_yards,
+                    COALESCE(int_touchdowns,           0)    AS int_touchdowns,
+                    COALESCE(def_targets,              0)    AS def_targets,
+                    COALESCE(def_completions_allowed,  0)    AS def_completions_allowed,
+                    COALESCE(tackles_for_loss,         0)    AS tackles_for_loss,
+                    COALESCE(fg_attempts,              0)    AS fg_attempts,
+                    COALESCE(fg_made,                  0)    AS fg_made,
+                    COALESCE(fg_longest,               0)    AS fg_longest,
+                    COALESCE(xp_attempts,              0)    AS xp_attempts,
+                    COALESCE(xp_made,                  0)    AS xp_made,
+                    COALESCE(kick_return_yards,        0)    AS kick_return_yards,
+                    COALESCE(punt_return_yards,        0)    AS punt_return_yards,
+                    team_points_scored, team_points_allowed, game_result,
+                    pff_grade
+                FROM player_game_stats
+                WHERE game_id = %s
+                ORDER BY team, position, player_name
+                """,
+                [game_id],
+            )
+            cols = [d[0] for d in cursor.description]
+            rows = cursor.fetchall()
+            players = [dict(zip(cols, r)) for r in rows]
+            logger.info("fetch_players_from_game %s: %d rows", game_id, len(players))
+            return players
+        except Exception as e:
+            logger.warning("fetch_players_from_game failed for %s: %s", game_id, e)
+            return []
+        finally:
+            cursor.close()
+
     def close(self):
         if self.connection:
             try:
