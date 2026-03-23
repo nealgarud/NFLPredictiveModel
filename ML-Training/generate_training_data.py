@@ -65,13 +65,91 @@ SELECT
     (g.home_score - g.away_score - g.spread_line)   AS ats_result,
     g.div_game,
 
-    -- Player impact (per-game from PFFGameProcessor)
+    -- Player impact legacy (PFFGameProcessor v1)
     gm.home_avg_impact,
     gm.away_avg_impact,
     gm.avg_impact_differential,
 
+    -- Player Impact PFF (PlayerImpactProcessor)
+    gm.home_total_impact,
+    gm.away_total_impact,
+    gm.impact_differential,
+    gm.home_tier_1_count,
+    gm.home_tier_2_count,
+    gm.home_tier_3_count,
+    gm.home_tier_4_count,
+    gm.home_tier_5_count,
+    gm.away_tier_1_count,
+    gm.away_tier_2_count,
+    gm.away_tier_3_count,
+    gm.away_tier_4_count,
+    gm.away_tier_5_count,
+    gm.home_qb1_active,
+    gm.home_rb1_active,
+    gm.home_wr1_active,
+    gm.home_edge1_active,
+    gm.home_cb1_active,
+    gm.away_qb1_active,
+    gm.away_rb1_active,
+    gm.away_wr1_active,
+    gm.away_edge1_active,
+    gm.away_cb1_active,
+
+    -- Offense / Defense / OL breakdown
+    gm.home_offense_impact,
+    gm.home_defense_impact,
+    gm.home_ol_impact,
+    gm.away_offense_impact,
+    gm.away_defense_impact,
+    gm.away_ol_impact,
+
+    -- PFF grades
+    gm.home_pff_offense,
+    gm.away_pff_offense,
+    gm.home_pff_defense,
+    gm.away_pff_defense,
+    gm.home_pff_run,
+    gm.away_pff_run,
+    gm.home_pff_passing,
+    gm.away_pff_passing,
+    gm.home_pff_coverage,
+    gm.away_pff_coverage,
+    gm.home_pff_pass_rush,
+    gm.away_pff_pass_rush,
+    gm.home_pff_special_teams,
+    gm.away_pff_special_teams,
+
+    -- Team rankings (PFF-based)
+    gm.home_run_offense_rank,
+    gm.away_run_offense_rank,
+    gm.home_pass_offense_rank,
+    gm.away_pass_offense_rank,
+    gm.home_run_defense_rank,
+    gm.away_run_defense_rank,
+    gm.home_pass_defense_rank,
+    gm.away_pass_defense_rank,
+    gm.home_pass_rush_rank,
+    gm.away_pass_rush_rank,
+    gm.home_special_teams_rank,
+    gm.away_special_teams_rank,
+
+    -- Matchup differentials (pre-computed)
+    gm.matchup_run_off_vs_run_def,
+    gm.matchup_pass_off_vs_coverage,
+    gm.matchup_pass_rush_vs_pass_block,
+    gm.matchup_overall_off_vs_def,
+    gm.matchup_special_teams,
+    gm.pff_overall_diff,
+
+    -- Box score / performance surprise
+    gm.home_actual_game_impact,
+    gm.away_actual_game_impact,
+    gm.home_performance_surprise,
+    gm.away_performance_surprise,
+    gm.performance_surprise_diff,
+
     -- Home team season rankings
-    home_tr.win_rate        AS home_win_rate,
+    home_tr.win_rate            AS home_win_rate,
     home_tr.avg_points_scored   AS home_ppg,
     home_tr.avg_points_allowed  AS home_papg,
     home_tr.point_differential  AS home_pt_diff,
@@ -82,7 +160,7 @@ SELECT
     home_tr.avg_spread_line     AS home_avg_spread,
 
     -- Away team season rankings
-    away_tr.win_rate        AS away_win_rate,
+    away_tr.win_rate            AS away_win_rate,
     away_tr.avg_points_scored   AS away_ppg,
     away_tr.avg_points_allowed  AS away_papg,
     away_tr.point_differential  AS away_pt_diff,
@@ -135,7 +213,7 @@ JOIN team_season_features away_tf
     ON g.away_team = away_tf.team_id AND g.season - 1 = away_tf.season
 WHERE g.game_type = 'REG'
     AND g.home_score IS NOT NULL
-    AND gm.home_avg_impact IS NOT NULL
+    AND g.away_score IS NOT NULL
 ORDER BY g.season, g.week
 """
 
@@ -189,8 +267,42 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df['pt_wr_diff']        = df['home_pt_wr'] - df['away_pt_wr']
     df['close_ats_diff']    = df['home_close_ats'] - df['away_close_ats']
 
+    # -- PlayerImpactProcessor differentials --
+    df['offense_impact_diff']  = df['home_offense_impact']  - df['away_offense_impact']
+    df['defense_impact_diff']  = df['home_defense_impact']  - df['away_defense_impact']
+    df['ol_impact_diff']       = df['home_ol_impact']       - df['away_ol_impact']
+    df['actual_impact_diff']   = df['home_actual_game_impact'] - df['away_actual_game_impact']
+    df['surprise_diff']        = df['home_performance_surprise'] - df['away_performance_surprise']
+
+    # PFF grade differentials
+    df['pff_offense_diff']      = df['home_pff_offense']      - df['away_pff_offense']
+    df['pff_defense_diff']      = df['home_pff_defense']      - df['away_pff_defense']
+    df['pff_pass_rush_diff']    = df['home_pff_pass_rush']    - df['away_pff_pass_rush']
+    df['pff_coverage_diff']     = df['home_pff_coverage']     - df['away_pff_coverage']
+    df['pff_run_diff']          = df['home_pff_run']          - df['away_pff_run']
+    df['pff_passing_diff']      = df['home_pff_passing']      - df['away_pff_passing']
+    df['pff_st_diff']           = df['home_pff_special_teams'] - df['away_pff_special_teams']
+
+    # PFF rank differentials (lower = better → away - home)
+    df['run_off_rank_diff']     = df['away_run_offense_rank']  - df['home_run_offense_rank']
+    df['pass_off_rank_diff']    = df['away_pass_offense_rank'] - df['home_pass_offense_rank']
+    df['run_def_rank_diff']     = df['away_run_defense_rank']  - df['home_run_defense_rank']
+    df['pass_def_rank_diff']    = df['away_pass_defense_rank'] - df['home_pass_defense_rank']
+    df['pass_rush_rank_diff']   = df['away_pass_rush_rank']    - df['home_pass_rush_rank']
+    df['st_rank_diff']          = df['away_special_teams_rank'] - df['home_special_teams_rank']
+
+    # Tier counts differential (home elite players minus away elite players)
+    df['tier1_diff'] = df['home_tier_1_count'] - df['away_tier_1_count']
+    df['tier2_diff'] = df['home_tier_2_count'] - df['away_tier_2_count']
+
     # -- Convert booleans --
     df['div_game'] = df['div_game'].fillna(False).astype(int)
+    for col in ['home_qb1_active', 'home_rb1_active', 'home_wr1_active',
+                'home_edge1_active', 'home_cb1_active',
+                'away_qb1_active', 'away_rb1_active', 'away_wr1_active',
+                'away_edge1_active', 'away_cb1_active']:
+        if col in df.columns:
+            df[col] = df[col].fillna(True).astype(int)
 
     # -- Fill any remaining NULLs with neutral values --
     df = df.fillna(0)
