@@ -294,8 +294,8 @@ def main():
     # Initialize trainer
     trainer = XGBoostTrainer(data_file='training_data.csv')
     
-    # Prepare data — time-based split: train 2022+2023, test 2024
-    trainer.prepare_data(train_seasons=(2022, 2023), test_season=2024)
+    # Prepare data — time-based split: train 2023, test 2024
+    trainer.prepare_data(train_seasons=(2023,), test_season=2024)
     
     # Train model
     trainer.train_model()
