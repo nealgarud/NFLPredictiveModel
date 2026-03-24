@@ -61,6 +61,7 @@ SELECT
     g.home_team, g.away_team,
     g.home_score, g.away_score,
     g.spread_line,
+    g.gameday,
     (g.home_score - g.away_score)                   AS actual_margin,
     (g.home_score - g.away_score - g.spread_line)   AS ats_result,
     g.div_game,
@@ -141,12 +142,14 @@ SELECT
     gm.matchup_special_teams,
     gm.pff_overall_diff,
 
-    -- Box score / performance surprise
+    -- Box score impact (safe — reflects what happened, used as feature)
     gm.home_actual_game_impact,
     gm.away_actual_game_impact,
+
+    -- Raw surprise scores — fetched for rolling window computation only.
+    -- These are post-game values and will be DROPPED before saving to CSV.
     gm.home_performance_surprise,
     gm.away_performance_surprise,
-    gm.performance_surprise_diff,
 
     -- Home team season rankings
     home_tr.win_rate            AS home_win_rate,
@@ -242,11 +245,62 @@ def fetch_raw_data():
 
 
 # ---------------------------------------------------------------------------
-# 4. FEATURE ENGINEERING
-#    The raw columns are good, but XGBoost does better with DIFFERENTIALS.
-#    Instead of feeding "home team scores 25 ppg" and "away team scores 20 ppg"
-#    separately, we also tell it "home team scores 5 MORE ppg than away."
-#    That gap is what actually predicts outcomes.
+# 4a. ROLLING SURPRISE FEATURES
+#     For each game we want to know: "how has this team been performing
+#     relative to expectations over their last N games?"
+#     We CANNOT use the current game's surprise (that's post-game leakage).
+#     So we build a per-team history from ALL games, then for each row
+#     look strictly backward (gameday < current game's gameday).
+# ---------------------------------------------------------------------------
+
+def compute_rolling_surprise(df: pd.DataFrame) -> pd.DataFrame:
+    # Convert gameday to datetime for reliable comparison
+    df['gameday'] = pd.to_datetime(df['gameday'])
+
+    # Build a flat per-team-game history from both sides of each game
+    home_hist = df[['home_team', 'gameday', 'home_performance_surprise']].rename(
+        columns={'home_team': 'team', 'home_performance_surprise': 'surprise'}
+    )
+    away_hist = df[['away_team', 'gameday', 'away_performance_surprise']].rename(
+        columns={'away_team': 'team', 'away_performance_surprise': 'surprise'}
+    )
+    history = pd.concat([home_hist, away_hist], ignore_index=True).sort_values('gameday')
+
+    def prior_rolling(team: str, game_date: pd.Timestamp, n: int) -> float:
+        """Mean surprise over the n games this team played strictly before game_date."""
+        prior = history.loc[
+            (history['team'] == team) & (history['gameday'] < game_date),
+            'surprise'
+        ].dropna()
+        if prior.empty:
+            return 0.0
+        return float(prior.iloc[-n:].mean())
+
+    logger.info("Computing rolling surprise features (3g, 5g) for %d games...", len(df))
+    df['home_rolling_3g_surprise'] = df.apply(
+        lambda r: prior_rolling(r['home_team'], r['gameday'], 3), axis=1
+    )
+    df['home_rolling_5g_surprise'] = df.apply(
+        lambda r: prior_rolling(r['home_team'], r['gameday'], 5), axis=1
+    )
+    df['away_rolling_3g_surprise'] = df.apply(
+        lambda r: prior_rolling(r['away_team'], r['gameday'], 3), axis=1
+    )
+    df['away_rolling_5g_surprise'] = df.apply(
+        lambda r: prior_rolling(r['away_team'], r['gameday'], 5), axis=1
+    )
+    df['rolling_3g_surprise_diff'] = df['home_rolling_3g_surprise'] - df['away_rolling_3g_surprise']
+    df['rolling_5g_surprise_diff'] = df['home_rolling_5g_surprise'] - df['away_rolling_5g_surprise']
+
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 4b. FEATURE ENGINEERING
+#     The raw columns are good, but XGBoost does better with DIFFERENTIALS.
+#     Instead of feeding "home team scores 25 ppg" and "away team scores 20 ppg"
+#     separately, we also tell it "home team scores 5 MORE ppg than away."
+#     That gap is what actually predicts outcomes.
 # ---------------------------------------------------------------------------
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -272,7 +326,6 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df['defense_impact_diff']  = df['home_defense_impact']  - df['away_defense_impact']
     df['ol_impact_diff']       = df['home_ol_impact']       - df['away_ol_impact']
     df['actual_impact_diff']   = df['home_actual_game_impact'] - df['away_actual_game_impact']
-    df['surprise_diff']        = df['home_performance_surprise'] - df['away_performance_surprise']
 
     # PFF grade differentials
     df['pff_offense_diff']      = df['home_pff_offense']      - df['away_pff_offense']
@@ -323,7 +376,15 @@ def main():
     logger.info("=" * 60)
 
     df = fetch_raw_data()
+    df = compute_rolling_surprise(df)    # uses home/away_performance_surprise + gameday
     df = engineer_features(df)
+
+    # Drop post-game leakage columns — must not appear in the final CSV
+    df.drop(columns=[
+        'home_performance_surprise',
+        'away_performance_surprise',
+        'gameday',
+    ], errors='ignore', inplace=True)
 
     output_path = os.path.join(os.path.dirname(__file__), 'training_data.csv')
     df.to_csv(output_path, index=False)
