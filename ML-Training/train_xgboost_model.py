@@ -15,7 +15,7 @@ import numpy as np
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split  # noqa: F401 (kept for any downstream use)
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 import joblib
 import json
@@ -39,47 +39,64 @@ class XGBoostTrainer:
         self.feature_names = None
         self.metrics = {}
     
-    def prepare_data(self, test_size=0.2, val_size=0.1):
+    def prepare_data(self, train_seasons=(2022, 2023), test_season=2024):
         """
-        Prepare train/validation/test splits
-        
-        Args:
-            test_size: Proportion for test set
-            val_size: Proportion for validation set (from remaining)
+        Prepare train/validation/test splits using a time-based split.
+
+        Train set : all games from train_seasons (2022 + 2023)
+        Validation: 15% random sample held out from the train set
+        Test set  : all games from test_season (2024)
+
+        This mirrors real deployment — the model never sees future seasons
+        during training, and the test set is a fixed "answer key" that
+        stays identical across v1.0, v2.0, etc. for fair comparison.
         """
-        logger.info("Preparing train/validation/test splits...")
-        
+        logger.info(
+            "Preparing time-based split: train=%s  test=%d",
+            list(train_seasons), test_season,
+        )
+
         # Identify feature columns (exclude metadata and target)
-        exclude_cols = ['game_id', 'season', 'week', 'favorite_team', 'underdog_team', 'favorite_covered']
+        exclude_cols = ['game_id', 'season', 'week', 'home_team', 'away_team',
+                        'home_score', 'away_score', 'actual_margin', 'ats_result',
+                        'favorite_team', 'underdog_team', 'favorite_covered']
         self.feature_names = [col for col in self.df.columns if col not in exclude_cols]
-        
+
         logger.info(f"Features ({len(self.feature_names)}): {self.feature_names}")
-        
-        X = self.df[self.feature_names]
-        y = self.df['favorite_covered']
-        
-        # Split: 70% train, 10% validation, 20% test
-        X_temp, X_test, y_temp, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42, stratify=y
-        )
-        
-        val_size_adjusted = val_size / (1 - test_size)
+
+        train_mask = self.df['season'].isin(train_seasons)
+        test_mask  = self.df['season'] == test_season
+
+        train_df = self.df[train_mask].copy()
+        test_df  = self.df[test_mask].copy()
+
+        X_all_train = train_df[self.feature_names]
+        y_all_train = train_df['favorite_covered']
+        X_test      = test_df[self.feature_names]
+        y_test      = test_df['favorite_covered']
+
+        # Hold out 15% of the training set as validation (shuffled within train seasons only)
         X_train, X_val, y_train, y_val = train_test_split(
-            X_temp, y_temp, test_size=val_size_adjusted, random_state=42, stratify=y_temp
+            X_all_train, y_all_train, test_size=0.15, random_state=42, stratify=y_all_train
         )
-        
-        logger.info(f"✓ Train: {len(X_train)} | Validation: {len(X_val)} | Test: {len(X_test)}")
+
+        logger.info(
+            "✓ Train: %d (%s) | Validation: %d (%s) | Test: %d (%d)",
+            len(X_train), list(train_seasons),
+            len(X_val),   list(train_seasons),
+            len(X_test),  test_season,
+        )
         logger.info(f"  Train target dist: {y_train.value_counts().to_dict()}")
-        logger.info(f"  Val target dist: {y_val.value_counts().to_dict()}")
-        logger.info(f"  Test target dist: {y_test.value_counts().to_dict()}")
-        
+        logger.info(f"  Val target dist:   {y_val.value_counts().to_dict()}")
+        logger.info(f"  Test target dist:  {y_test.value_counts().to_dict()}")
+
         self.X_train = X_train
-        self.X_val = X_val
-        self.X_test = X_test
+        self.X_val   = X_val
+        self.X_test  = X_test
         self.y_train = y_train
-        self.y_val = y_val
-        self.y_test = y_test
-        
+        self.y_val   = y_val
+        self.y_test  = y_test
+
         return X_train, X_val, X_test, y_train, y_val, y_test
     
     def train_model(self, params=None):
@@ -277,8 +294,8 @@ def main():
     # Initialize trainer
     trainer = XGBoostTrainer(data_file='training_data.csv')
     
-    # Prepare data
-    trainer.prepare_data(test_size=0.2, val_size=0.1)
+    # Prepare data — time-based split: train 2022+2023, test 2024
+    trainer.prepare_data(train_seasons=(2022, 2023), test_season=2024)
     
     # Train model
     trainer.train_model()
