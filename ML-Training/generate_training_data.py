@@ -348,6 +348,14 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df['tier1_diff'] = df['home_tier_1_count'] - df['away_tier_1_count']
     df['tier2_diff'] = df['home_tier_2_count'] - df['away_tier_2_count']
 
+    # -- Target variable --
+    # spread_line is from home team perspective (negative = home favored).
+    # favorite_covered = 1 when the favored team beat the spread.
+    df['favorite_covered'] = (
+        ((df['spread_line'] <= 0) & (df['ats_result'] > 0)) |
+        ((df['spread_line'] >  0) & (df['ats_result'] < 0))
+    ).astype(int)
+
     # -- Convert booleans --
     df['div_game'] = df['div_game'].fillna(False).astype(int)
     for col in ['home_qb1_active', 'home_rb1_active', 'home_wr1_active',
